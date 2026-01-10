@@ -14,7 +14,7 @@ async function obtenerMetodosPago(req, res) {
   });
 }
 
-// HISTORIAL DE PAGOS
+// HISTORIAL DE PAGOS CON FILTROS
 async function obtenerHistorialPagos(req, res) {
   try {
     const { cliente_id } = req.params;
@@ -52,9 +52,8 @@ async function obtenerHistorialPagos(req, res) {
     
     const [pagos] = await pool.query(query, params);
     
-    // Calcular totales
-    const totalActivos = pagos.filter(p => p.estado === 'activo').reduce((sum, p) => sum + parseFloat(p.monto), 0);
-    const totalCancelados = pagos.filter(p => p.estado === 'cancelado').reduce((sum, p) => sum + parseFloat(p.monto), 0);
+    const totalActivos = pagos.filter(p => p.estado === 'activo' || !p.estado).reduce((sum, p) => sum + parseFloat(p.monto || 0), 0);
+    const totalCancelados = pagos.filter(p => p.estado === 'cancelado').reduce((sum, p) => sum + parseFloat(p.monto || 0), 0);
     
     res.json({ 
       ok: true, 
@@ -147,12 +146,9 @@ async function registrarPago(req, res) {
       const [cliente] = await connection.query('SELECT saldo_favor FROM clientes WHERE id = ?', [cliente_id]);
       const saldoDisponible = parseFloat(cliente[0]?.saldo_favor || 0);
       if (saldoDisponible > 0) {
-        montoDescontadoSaldo = saldoDisponible; // Usa todo el saldo disponible
+        montoDescontadoSaldo = saldoDisponible;
         montoAplicar = montoRecibido + montoDescontadoSaldo;
-        await connection.query(
-          'UPDATE clientes SET saldo_favor = 0 WHERE id = ?',
-          [cliente_id]
-        );
+        await connection.query('UPDATE clientes SET saldo_favor = 0 WHERE id = ?', [cliente_id]);
       }
     }
 
@@ -161,7 +157,7 @@ async function registrarPago(req, res) {
     let totalAplicadoACargos = 0;
     let detalleAplicacion = [];
 
-    // 1. Obtener mensualidades pendientes (más antiguas primero)
+    // 1. Obtener mensualidades pendientes
     const [mensualidades] = await connection.query(
       `SELECT id, 'mensualidad' as tipo, concepto, monto, COALESCE(monto_pagado, 0) as monto_pagado,
               (monto - COALESCE(monto_pagado, 0)) as pendiente
@@ -223,7 +219,7 @@ async function registrarPago(req, res) {
       detalleAplicacion.push(`Saldo a favor: $${montoRestante.toFixed(2)}`);
     }
 
-    // 5. Insertar registro del pago (solo el monto recibido, no el total aplicado)
+    // 5. Insertar registro del pago (solo monto recibido)
     const [result] = await connection.query(
       `INSERT INTO pagos (
         cliente_id, monto, metodo_pago, referencia, banco,
@@ -265,7 +261,7 @@ async function registrarPago(req, res) {
   }
 }
 
-// CANCELAR PAGO - CORREGIDO (no revierte cargos, solo agrega monto original a saldo)
+// CANCELAR PAGO - CORREGIDO (solo agrega monto original a saldo)
 async function cancelarPago(req, res) {
   const pool = obtenerPool();
   const connection = await pool.getConnection();
@@ -276,7 +272,6 @@ async function cancelarPago(req, res) {
     const { id } = req.params;
     const { motivo } = req.body;
 
-    // Obtener pago
     const [pagos] = await connection.query('SELECT * FROM pagos WHERE id = ?', [id]);
     if (!pagos.length) {
       connection.release();
@@ -293,8 +288,7 @@ async function cancelarPago(req, res) {
     const montoRevertir = parseFloat(pago.monto);
     const clienteId = pago.cliente_id;
 
-    // Solo agregar el monto ORIGINAL del pago a saldo a favor
-    // NO revertimos los cargos porque eso complicaría la contabilidad
+    // Solo agregar monto ORIGINAL a saldo a favor
     await connection.query(
       'UPDATE clientes SET saldo_favor = saldo_favor + ? WHERE id = ?',
       [montoRevertir, clienteId]
@@ -309,9 +303,6 @@ async function cancelarPago(req, res) {
        WHERE id = ?`,
       [motivo || 'Cancelado por usuario', id]
     );
-
-    // NO actualizamos saldo_pendiente porque los cargos siguen "pagados"
-    // El saldo a favor compensa esto
 
     await connection.commit();
 
@@ -341,7 +332,7 @@ async function editarPago(req, res) {
       `UPDATE pagos SET 
         referencia = ?, banco = ?, quien_paga = ?, 
         telefono_quien_paga = ?, observaciones = ?, metodo_pago = ?
-       WHERE id = ? AND estado = 'activo'`,
+       WHERE id = ? AND estado != 'cancelado'`,
       [referencia, banco, quien_paga, telefono_quien_paga, observaciones, metodo_pago, id]
     );
 
