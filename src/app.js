@@ -13,12 +13,14 @@ const catalogosRutas = require('./rutas/catalogos.rutas');
 const clientesRutas = require('./rutas/clientes.rutas');
 const dashboardRutas = require('./rutas/dashboard.rutas');
 const pagosRutas = require('./rutas/pagos.rutas');
+const equiposRutas = require('./rutas/equipos.rutas');
 
 app.use('/api/auth', authRutas);
 app.use('/api/catalogos', catalogosRutas);
 app.use('/api/clientes', clientesRutas);
 app.use('/api/dashboard', dashboardRutas);
 app.use('/api/pagos', pagosRutas);
+app.use('/api/equipos', equiposRutas);
 
 // Ruta de prueba
 app.get('/', (req, res) => {
