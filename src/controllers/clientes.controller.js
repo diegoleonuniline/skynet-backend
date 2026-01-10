@@ -150,9 +150,12 @@ const getById = async (req, res, next) => {
             }
         });
 
-        // Calcular saldo
+        // Calcular saldo (suma de saldo_contra - saldo_favor de todos los servicios del cliente)
         const [saldoResult] = await db.query(
-            `SELECT COALESCE(SUM(saldo), 0) as saldo FROM saldos_cliente WHERE cliente_id = ?`,
+            `SELECT COALESCE(SUM(sc.saldo_contra - sc.saldo_favor), 0) as saldo 
+             FROM saldos_cliente sc
+             INNER JOIN servicios s ON sc.servicio_id = s.id
+             WHERE s.cliente_id = ? AND sc.is_active = 1`,
             [req.params.id]
         );
 
