@@ -1,79 +1,129 @@
-const bcrypt = require('bcryptjs');
+const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const { obtenerPool } = require('../configuracion/base_datos');
-const jwtCfg = require('../configuracion/jwt');
 
+const JWT_SECRET = process.env.JWT_SECRET || 'skynet_secreto_jwt_2024';
+
+// LOGIN
 async function login(req, res) {
   try {
-    const { usuario, contrasena } = req.body || {};
+    const { usuario, password } = req.body;
 
-    if (!usuario || !contrasena) {
-      return res.status(400).json({ ok: false, mensaje: 'Falta usuario o contraseña.' });
+    if (!usuario || !password) {
+      return res.status(400).json({ ok: false, mensaje: 'Usuario y contraseña requeridos' });
     }
 
     const pool = obtenerPool();
-
-    // 1) Buscar usuario activo
+    
     const [rows] = await pool.query(
-      `SELECT u.id, u.usuario, u.hash_contrasena, u.estado, u.intentos_fallidos,
-              r.clave AS rol_clave, r.nombre AS rol_nombre
-       FROM usuarios u
-       INNER JOIN catalogo_roles r ON r.id = u.rol_id
-       WHERE u.usuario = ?
-       LIMIT 1`,
+      `SELECT id, usuario, nombre_completo, hash_contrasena, estado, rol_id 
+       FROM usuarios 
+       WHERE usuario = ? AND estado = 'activo'`,
       [usuario]
     );
 
-    if (!rows.length) {
-      return res.status(401).json({ ok: false, mensaje: 'Credenciales inválidas.' });
+    if (rows.length === 0) {
+      return res.status(401).json({ ok: false, mensaje: 'Credenciales inválidas' });
     }
 
-    const u = rows[0];
+    const user = rows[0];
+    const passwordValido = await bcrypt.compare(password, user.hash_contrasena);
 
-    if (u.estado !== 'activo') {
-      return res.status(403).json({ ok: false, mensaje: `Usuario ${u.estado}.` });
-    }
-
-    // 2) Comparar contraseña
-    const coincide = await bcrypt.compare(contrasena, u.hash_contrasena);
-    if (!coincide) {
-      // incrementa intentos (seguro y rápido)
+    if (!passwordValido) {
+      // Incrementar intentos fallidos
       await pool.query(
-        `UPDATE usuarios
-         SET intentos_fallidos = intentos_fallidos + 1
-         WHERE id = ?`,
-        [u.id]
+        'UPDATE usuarios SET intentos_fallidos = intentos_fallidos + 1 WHERE id = ?',
+        [user.id]
       );
-
-      return res.status(401).json({ ok: false, mensaje: 'Credenciales inválidas.' });
+      return res.status(401).json({ ok: false, mensaje: 'Credenciales inválidas' });
     }
 
-    // 3) Login correcto: reset intentos + último acceso (en paralelo)
-    await Promise.all([
-      pool.query(`UPDATE usuarios SET intentos_fallidos = 0, ultimo_acceso = NOW() WHERE id = ?`, [u.id])
-    ]);
-
-    // 4) Generar token
-    const token = jwt.sign(
-      { usuario_id: u.id, usuario: u.usuario, rol: u.rol_clave },
-      jwtCfg.secreto,
-      { expiresIn: jwtCfg.expira }
+    // Resetear intentos y actualizar último acceso
+    await pool.query(
+      'UPDATE usuarios SET intentos_fallidos = 0, ultimo_acceso = NOW() WHERE id = ?',
+      [user.id]
     );
 
-    return res.json({
+    // Obtener nombre del rol si existe
+    let rolNombre = 'usuario';
+    if (user.rol_id) {
+      try {
+        const [rolRows] = await pool.query('SELECT nombre FROM roles WHERE id = ?', [user.rol_id]);
+        if (rolRows.length > 0) rolNombre = rolRows[0].nombre;
+      } catch (e) {
+        // Tabla roles no existe
+      }
+    }
+
+    const token = jwt.sign(
+      { 
+        usuario_id: user.id, 
+        usuario: user.usuario,
+        nombre: user.nombre_completo,
+        rol: rolNombre
+      },
+      JWT_SECRET,
+      { expiresIn: '24h' }
+    );
+
+    res.json({
       ok: true,
-      mensaje: 'Inicio de sesión exitoso.',
+      mensaje: 'Login exitoso',
       token,
       usuario: {
-        id: u.id,
-        usuario: u.usuario,
-        rol: { clave: u.rol_clave, nombre: u.rol_nombre }
+        id: user.id,
+        usuario: user.usuario,
+        nombre: user.nombre_completo,
+        rol: rolNombre
       }
     });
+
   } catch (err) {
-    console.error('❌ Error login:', err?.message || err);
-    return res.status(500).json({ ok: false, mensaje: 'Error interno del servidor.' });
+    console.error('❌ Error login:', err.message);
+    res.status(500).json({ ok: false, mensaje: 'Error en el servidor' });
   }
 }
 
-module.exports = { login };
+// VERIFICAR TOKEN
+async function verificarToken(req, res) {
+  try {
+    const token = req.headers.authorization?.replace('Bearer ', '');
+    
+    if (!token) {
+      return res.status(401).json({ ok: false, mensaje: 'Token no proporcionado' });
+    }
+
+    const decoded = jwt.verify(token, JWT_SECRET);
+    
+    res.json({
+      ok: true,
+      usuario: {
+        id: decoded.usuario_id,
+        usuario: decoded.usuario,
+        nombre: decoded.nombre,
+        rol: decoded.rol
+      }
+    });
+  } catch (err) {
+    res.status(401).json({ ok: false, mensaje: 'Token inválido' });
+  }
+}
+
+// MIDDLEWARE DE AUTENTICACIÓN
+function authMiddleware(req, res, next) {
+  try {
+    const token = req.headers.authorization?.replace('Bearer ', '');
+    
+    if (!token) {
+      return res.status(401).json({ ok: false, mensaje: 'Acceso denegado' });
+    }
+
+    const decoded = jwt.verify(token, JWT_SECRET);
+    req.usuario = decoded;
+    next();
+  } catch (err) {
+    res.status(401).json({ ok: false, mensaje: 'Token inválido' });
+  }
+}
+
+module.exports = { login, verificarToken, authMiddleware };
