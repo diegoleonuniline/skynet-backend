@@ -114,14 +114,46 @@ const getById = async (req, res, next) => {
             return response.error(res, 'Cliente no encontrado', 404);
         }
 
-        // Obtener servicios con tarifa
+        // Obtener servicios con tarifa y saldo individual
         const [servicios] = await db.query(
-            `SELECT s.*, t.nombre as tarifa_nombre, t.monto as tarifa_monto,
-                    es.nombre as estatus, es.color as estatus_color
+            `SELECT s.*, 
+                    t.nombre as tarifa_nombre, t.monto as tarifa_monto, t.velocidad_mbps,
+                    es.nombre as estatus, es.color as estatus_color,
+                    COALESCE((SELECT SUM(saldo_pendiente) FROM cargos WHERE servicio_id = s.id AND estatus IN ('PENDIENTE', 'PARCIAL') AND is_active = 1), 0) as saldo
              FROM servicios s
              LEFT JOIN cat_tarifas t ON s.tarifa_id = t.id
              LEFT JOIN cat_estatus_servicio es ON s.estatus_id = es.id
-             WHERE s.cliente_id = ? AND s.deleted_at IS NULL`,
+             WHERE s.cliente_id = ? AND s.deleted_at IS NULL
+             ORDER BY s.created_at DESC`,
+            [req.params.id]
+        );
+
+        // Obtener todos los cargos del cliente (para estado de cuenta)
+        const [cargos] = await db.query(
+            `SELECT ca.*, 
+                    s.codigo as servicio_codigo,
+                    cc.nombre as concepto,
+                    cc.clave as concepto_clave
+             FROM cargos ca
+             INNER JOIN servicios s ON ca.servicio_id = s.id
+             LEFT JOIN cat_conceptos_cobro cc ON ca.concepto_id = cc.id
+             WHERE s.cliente_id = ? AND ca.is_active = 1 AND ca.deleted_at IS NULL
+             ORDER BY ca.fecha_vencimiento DESC, ca.created_at DESC`,
+            [req.params.id]
+        );
+
+        // Obtener todos los pagos del cliente
+        const [pagos] = await db.query(
+            `SELECT p.*, 
+                    s.codigo as servicio_codigo,
+                    mp.nombre as metodo_pago,
+                    b.nombre as banco
+             FROM pagos p
+             INNER JOIN servicios s ON p.servicio_id = s.id
+             LEFT JOIN cat_metodos_pago mp ON p.metodo_pago_id = mp.id
+             LEFT JOIN cat_bancos b ON p.banco_id = b.id
+             WHERE s.cliente_id = ? AND p.is_active = 1 AND p.deleted_at IS NULL
+             ORDER BY p.fecha_pago DESC`,
             [req.params.id]
         );
 
@@ -132,7 +164,7 @@ const getById = async (req, res, next) => {
             [req.params.id]
         );
 
-        // Formatear INEs para el frontend
+        // Formatear INEs
         const ineData = {
             ine_frente: null,
             ine_frente_fecha: null,
@@ -150,28 +182,42 @@ const getById = async (req, res, next) => {
             }
         });
 
-        // Calcular saldo (suma de saldo_contra - saldo_favor de todos los servicios del cliente)
-        const [saldoResult] = await db.query(
-            `SELECT COALESCE(SUM(sc.saldo_contra - sc.saldo_favor), 0) as saldo 
-             FROM saldos_cliente sc
-             INNER JOIN servicios s ON sc.servicio_id = s.id
-             WHERE s.cliente_id = ? AND sc.is_active = 1`,
-            [req.params.id]
-        );
+        // Calcular saldo total del cliente (suma de todos los cargos pendientes)
+        const saldoTotal = servicios.reduce((acc, s) => acc + parseFloat(s.saldo || 0), 0);
 
-        // Obtener tarifa del primer servicio activo
+        // Calcular próximo vencimiento
+        const cargosPendientes = cargos.filter(c => c.estatus === 'PENDIENTE' || c.estatus === 'PARCIAL');
+        let proximoVencimiento = null;
+        let diasVencimiento = null;
+        
+        if (cargosPendientes.length > 0) {
+            const proximoCargo = cargosPendientes.reduce((min, c) => 
+                new Date(c.fecha_vencimiento) < new Date(min.fecha_vencimiento) ? c : min
+            );
+            proximoVencimiento = new Date(proximoCargo.fecha_vencimiento).toLocaleDateString('es-MX');
+            const hoy = new Date();
+            const fechaVenc = new Date(proximoCargo.fecha_vencimiento);
+            diasVencimiento = Math.ceil((fechaVenc - hoy) / (1000 * 60 * 60 * 24));
+        }
+
+        // Info de tarifa del primer servicio activo
         let tarifaInfo = { tarifa_nombre: null, tarifa_monto: null };
-        if (servicios.length > 0) {
-            tarifaInfo.tarifa_nombre = servicios[0].tarifa_nombre;
-            tarifaInfo.tarifa_monto = servicios[0].tarifa_monto;
+        const servicioActivo = servicios.find(s => s.estatus === 'ACTIVO') || servicios[0];
+        if (servicioActivo) {
+            tarifaInfo.tarifa_nombre = servicioActivo.tarifa_nombre;
+            tarifaInfo.tarifa_monto = servicioActivo.tarifa_monto;
         }
 
         response.success(res, { 
             ...clientes[0], 
             servicios,
+            cargos,
+            pagos,
             ...ineData,
             ...tarifaInfo,
-            saldo: saldoResult[0]?.saldo || 0
+            saldo: saldoTotal,
+            proximo_vencimiento: proximoVencimiento,
+            dias_vencimiento: diasVencimiento
         });
     } catch (error) {
         next(error);
