@@ -1,11 +1,9 @@
 {
   "name": "skynet-backend",
   "version": "1.0.0",
-  "description": "Backend API para Skynet ISP",
   "main": "src/index.js",
   "scripts": {
-    "start": "node src/index.js",
-    "dev": "nodemon src/index.js"
+    "start": "node src/index.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",

@@ -23,42 +23,18 @@ const PERMISOS = {
   }
 };
 
-const getPermisosUsuario = (rol) => {
-  return PERMISOS[rol] || PERMISOS.Empleado;
-};
-
 const checkPermiso = (modulo, accion) => {
   return (req, res, next) => {
     const rol = req.user?.rol_nombre || 'Empleado';
     const permisos = PERMISOS[rol] || PERMISOS.Empleado;
-    
-    if (permisos[modulo]?.includes(accion)) {
-      return next();
-    }
-    
-    return res.status(403).json({
-      success: false,
-      message: 'No tienes permiso para realizar esta acción'
-    });
+    if (permisos[modulo]?.includes(accion)) return next();
+    return res.status(403).json({ success: false, message: 'Sin permiso' });
   };
 };
 
 const soloAdmin = (req, res, next) => {
-  const rol = req.user?.rol_nombre;
-  
-  if (rol === 'Administrador') {
-    return next();
-  }
-  
-  return res.status(403).json({
-    success: false,
-    message: 'Solo administradores pueden realizar esta acción'
-  });
+  if (req.user?.rol_nombre === 'Administrador') return next();
+  return res.status(403).json({ success: false, message: 'Solo administradores' });
 };
 
-module.exports = {
-  PERMISOS,
-  getPermisosUsuario,
-  checkPermiso,
-  soloAdmin
-};
+module.exports = { PERMISOS, checkPermiso, soloAdmin };

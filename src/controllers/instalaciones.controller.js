@@ -1,56 +1,46 @@
 const pool = require('../config/database');
 const { v4: uuidv4 } = require('uuid');
 
+// instalaciones: id, servicio_id, fecha_instalacion, costo_instalacion, tecnico_instalador
+
 const listar = async (req, res) => {
   try {
-    const { estado_id, limit = 50 } = req.query;
+    const { limit = 50 } = req.query;
     
-    let query = `
-      SELECT i.*, c.nombre as cliente_nombre, c.apellido_paterno, c.calle, c.numero_exterior
-      FROM instalaciones i
-      JOIN servicios s ON i.servicio_id = s.id
-      JOIN clientes c ON s.cliente_id = c.id
-      WHERE i.activo = 1
-    `;
-    const params = [];
+    const [instalaciones] = await pool.query(
+      `SELECT i.*, c.nombre as cliente_nombre, c.apellido_paterno, c.calle, c.numero
+       FROM instalaciones i
+       JOIN servicios s ON i.servicio_id = s.id
+       JOIN clientes c ON s.cliente_id = c.id
+       ORDER BY i.fecha_instalacion DESC LIMIT ?`, [parseInt(limit)]
+    );
     
-    if (estado_id) {
-      query += ` AND i.estado_id = ?`;
-      params.push(estado_id);
+    for (let i of instalaciones) {
+      i.cliente_nombre = `${i.cliente_nombre} ${i.apellido_paterno}`;
+      i.direccion = `${i.calle || ''} ${i.numero || ''}`.trim();
+      i.estado = 'Completada';
+      i.fecha_programada = i.fecha_instalacion;
     }
-    
-    query += ` ORDER BY i.fecha_programada DESC LIMIT ?`;
-    params.push(parseInt(limit));
-    
-    const [instalaciones] = await pool.query(query, params);
-    
-    for (let inst of instalaciones) {
-      inst.cliente_nombre = `${inst.cliente_nombre} ${inst.apellido_paterno}`;
-      inst.direccion = `${inst.calle || ''} ${inst.numero_exterior || ''}`.trim();
-      inst.estado = inst.activo ? 'Programada' : 'Completada';
-    }
-    
     res.json({ success: true, data: instalaciones });
   } catch (error) {
-    res.status(500).json({ success: false, message: 'Error al listar instalaciones' });
+    console.error('Error:', error);
+    res.status(500).json({ success: false, message: 'Error' });
   }
 };
 
 const crear = async (req, res) => {
   try {
-    const { servicio_id, fecha_programada, tecnico_id, notas } = req.body;
-    
+    const { servicio_id, fecha_instalacion, costo_instalacion, tecnico_instalador } = req.body;
     const id = uuidv4();
-    
     await pool.query(
-      `INSERT INTO instalaciones (id, servicio_id, fecha_programada, tecnico_id, notas, activo, created_by)
-       VALUES (?, ?, ?, ?, ?, 1, ?)`,
-      [id, servicio_id, fecha_programada, tecnico_id || null, notas || null, req.userId]
+      `INSERT INTO instalaciones (id, servicio_id, fecha_instalacion, costo_instalacion, tecnico_instalador, created_by)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [id, servicio_id, fecha_instalacion, costo_instalacion || null, tecnico_instalador || null, req.userId]
     );
-    
     res.status(201).json({ success: true, data: { id } });
   } catch (error) {
-    res.status(500).json({ success: false, message: 'Error al crear instalación' });
+    console.error('Error:', error);
+    res.status(500).json({ success: false, message: 'Error' });
   }
 };
 

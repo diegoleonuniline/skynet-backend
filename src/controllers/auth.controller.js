@@ -7,13 +7,9 @@ const login = async (req, res) => {
     const { username, password } = req.body;
     
     if (!username || !password) {
-      return res.status(400).json({
-        success: false,
-        message: 'Usuario y contraseña son requeridos'
-      });
+      return res.status(400).json({ success: false, message: 'Usuario y contraseña requeridos' });
     }
     
-    // Buscar usuario por email (username = email en este sistema)
     const [users] = await pool.query(
       `SELECT u.*, r.nombre as rol_nombre
        FROM usuarios u
@@ -24,25 +20,16 @@ const login = async (req, res) => {
     );
     
     if (users.length === 0) {
-      return res.status(401).json({
-        success: false,
-        message: 'Credenciales inválidas'
-      });
+      return res.status(401).json({ success: false, message: 'Credenciales inválidas' });
     }
     
     const user = users[0];
-    
-    // Comparar contraseña
     const validPassword = await bcrypt.compare(password, user.password);
     
     if (!validPassword) {
-      return res.status(401).json({
-        success: false,
-        message: 'Credenciales inválidas'
-      });
+      return res.status(401).json({ success: false, message: 'Credenciales inválidas' });
     }
     
-    // Generar token
     const token = jwt.sign(
       { userId: user.id, rol: user.rol_nombre || 'Empleado' },
       process.env.JWT_SECRETO || 'skynet_secreto_2024',
@@ -53,97 +40,39 @@ const login = async (req, res) => {
       success: true,
       data: {
         token,
-        user: {
-          id: user.id,
-          nombre_completo: user.nombre,
-          email: user.email,
-          rol: user.rol_nombre || 'Empleado'
-        }
+        user: { id: user.id, nombre_completo: user.nombre, email: user.email, rol: user.rol_nombre || 'Empleado' }
       }
     });
-    
   } catch (error) {
-    console.error('Error en login:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error interno del servidor'
-    });
+    console.error('Error login:', error);
+    res.status(500).json({ success: false, message: 'Error interno' });
   }
 };
 
 const perfil = async (req, res) => {
-  try {
-    res.json({
-      success: true,
-      data: {
-        id: req.user.id,
-        nombre_completo: req.user.nombre,
-        email: req.user.email,
-        rol: req.user.rol_nombre || 'Empleado'
-      }
-    });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: 'Error al obtener perfil'
-    });
-  }
+  res.json({
+    success: true,
+    data: { id: req.user.id, nombre_completo: req.user.nombre, email: req.user.email, rol: req.user.rol_nombre || 'Empleado' }
+  });
 };
 
 const cambiarPassword = async (req, res) => {
   try {
     const { password_actual, password_nuevo } = req.body;
-    
-    if (!password_actual || !password_nuevo) {
-      return res.status(400).json({
-        success: false,
-        message: 'Contraseña actual y nueva son requeridas'
-      });
+    if (!password_actual || !password_nuevo || password_nuevo.length < 6) {
+      return res.status(400).json({ success: false, message: 'Contraseña inválida' });
     }
     
-    if (password_nuevo.length < 6) {
-      return res.status(400).json({
-        success: false,
-        message: 'La contraseña debe tener al menos 6 caracteres'
-      });
-    }
+    const [users] = await pool.query('SELECT password FROM usuarios WHERE id = ?', [req.userId]);
+    const valid = await bcrypt.compare(password_actual, users[0].password);
+    if (!valid) return res.status(400).json({ success: false, message: 'Contraseña incorrecta' });
     
-    const [users] = await pool.query(
-      'SELECT password FROM usuarios WHERE id = ?',
-      [req.userId]
-    );
-    
-    const validPassword = await bcrypt.compare(password_actual, users[0].password);
-    
-    if (!validPassword) {
-      return res.status(400).json({
-        success: false,
-        message: 'Contraseña actual incorrecta'
-      });
-    }
-    
-    const newHash = await bcrypt.hash(password_nuevo, 10);
-    
-    await pool.query(
-      'UPDATE usuarios SET password = ?, updated_by = ? WHERE id = ?',
-      [newHash, req.userId, req.userId]
-    );
-    
-    res.json({
-      success: true,
-      message: 'Contraseña actualizada correctamente'
-    });
-    
+    const hash = await bcrypt.hash(password_nuevo, 10);
+    await pool.query('UPDATE usuarios SET password = ?, updated_by = ? WHERE id = ?', [hash, req.userId, req.userId]);
+    res.json({ success: true, message: 'Contraseña actualizada' });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: 'Error al cambiar contraseña'
-    });
+    res.status(500).json({ success: false, message: 'Error' });
   }
 };
 
-module.exports = {
-  login,
-  perfil,
-  cambiarPassword
-};
+module.exports = { login, perfil, cambiarPassword };
