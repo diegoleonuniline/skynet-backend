@@ -14,6 +14,7 @@ async function obtenerCargos(req, res) {
     // Mensualidades pendientes
     const [mensualidades] = await pool.query(
       `SELECT id, 'mensualidad' as tipo, concepto, descripcion, monto, monto_pagado, 
+              (monto - COALESCE(monto_pagado, 0)) as pendiente,
               fecha_vencimiento, estado, periodo, es_prorrateado
        FROM mensualidades 
        WHERE cliente_id = ? AND estado IN ('pendiente', 'vencido', 'parcial')
@@ -25,6 +26,7 @@ async function obtenerCargos(req, res) {
     const [instalaciones] = await pool.query(
       `SELECT id, 'instalacion' as tipo, 'Costo de Instalación' as concepto, 
               notas as descripcion, monto, monto_pagado, 
+              (monto - COALESCE(monto_pagado, 0)) as pendiente,
               fecha_instalacion as fecha_vencimiento, estado
        FROM instalaciones 
        WHERE cliente_id = ? AND estado IN ('pendiente', 'parcial')`,
