@@ -1,5 +1,13 @@
 const { obtenerPool } = require('../configuracion/base_datos');
-const { generarCargosIniciales } = require('./cargos.controlador');
+
+// Intentar importar cargos, pero no fallar si no existe
+let generarCargosIniciales = null;
+try {
+  const cargosCtrl = require('./cargos.controlador');
+  generarCargosIniciales = cargosCtrl.generarCargosIniciales;
+} catch (e) {
+  console.log('⚠️ Módulo de cargos no disponible aún');
+}
 
 // ========================================
 // OBTENER CLIENTES (con paginación y filtros)
@@ -47,18 +55,12 @@ async function obtenerClientes(req, res) {
     );
     const total = countResult[0].total;
 
-    // Obtener clientes con saldo pendiente
+    // Obtener clientes - compatible con ambas estructuras de tablas
     const [rows] = await pool.query(
       `SELECT c.*, 
               ci.nombre as ciudad_nombre,
               co.nombre as colonia_nombre,
-              p.nombre as plan_nombre,
-              COALESCE(
-                (SELECT SUM(ca.saldo_pendiente) 
-                 FROM cargos ca 
-                 WHERE ca.cliente_id = c.id AND ca.estado IN ('pendiente','parcial')
-                ), 0
-              ) as saldo_pendiente
+              p.nombre as plan_nombre
        FROM clientes c
        LEFT JOIN ciudades ci ON ci.id = c.ciudad_id
        LEFT JOIN colonias co ON co.id = c.colonia_id
@@ -92,17 +94,26 @@ async function obtenerCliente(req, res) {
     const { id } = req.params;
     const pool = obtenerPool();
 
+    // Verificar si existe la tabla cargos
+    let saldoQuery = '0 as saldo_pendiente';
+    try {
+      await pool.query('SELECT 1 FROM cargos LIMIT 1');
+      saldoQuery = `COALESCE(
+        (SELECT SUM(ca.saldo_pendiente) 
+         FROM cargos ca 
+         WHERE ca.cliente_id = c.id AND ca.estado IN ('pendiente','parcial')
+        ), 0
+      ) as saldo_pendiente`;
+    } catch (e) {
+      // Tabla cargos no existe aún
+    }
+
     const [rows] = await pool.query(
       `SELECT c.*, 
               ci.nombre as ciudad_nombre,
               co.nombre as colonia_nombre,
               p.nombre as plan_nombre,
-              COALESCE(
-                (SELECT SUM(ca.saldo_pendiente) 
-                 FROM cargos ca 
-                 WHERE ca.cliente_id = c.id AND ca.estado IN ('pendiente','parcial')
-                ), 0
-              ) as saldo_pendiente
+              ${saldoQuery}
        FROM clientes c
        LEFT JOIN ciudades ci ON ci.id = c.ciudad_id
        LEFT JOIN colonias co ON co.id = c.colonia_id
@@ -123,7 +134,7 @@ async function obtenerCliente(req, res) {
 }
 
 // ========================================
-// CREAR CLIENTE (con cargos automáticos)
+// CREAR CLIENTE (con cargos automáticos si están disponibles)
 // ========================================
 
 async function crearCliente(req, res) {
@@ -132,7 +143,7 @@ async function crearCliente(req, res) {
       nombre, apellido_paterno, apellido_materno,
       telefono, telefono_secundario, email,
       ciudad_id, colonia_id, direccion, referencia,
-      plan_id, tarifa_mensual, costo_instalacion,
+      plan_id, tarifa_mensual, cuota_mensual, costo_instalacion,
       fecha_instalacion, dia_corte,
       tecnico_instalador, notas_instalacion
     } = req.body;
@@ -144,36 +155,35 @@ async function crearCliente(req, res) {
     const pool = obtenerPool();
     const id = generarUUID();
     const numero_cliente = await generarNumeroCliente(pool);
+    
+    // Usar tarifa_mensual o cuota_mensual (compatibilidad)
+    const tarifa = tarifa_mensual || cuota_mensual || 0;
 
     await pool.query(
       `INSERT INTO clientes (
         id, numero_cliente, nombre, apellido_paterno, apellido_materno,
         telefono, telefono_secundario, email,
         ciudad_id, colonia_id, direccion, referencia,
-        plan_id, tarifa_mensual, costo_instalacion,
-        fecha_instalacion, dia_corte,
-        tecnico_instalador, notas_instalacion,
+        plan_id, tarifa_mensual, fecha_instalacion,
         creado_por
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         id, numero_cliente, nombre, apellido_paterno || null, apellido_materno || null,
         telefono, telefono_secundario || null, email || null,
         ciudad_id || null, colonia_id || null, direccion || null, referencia || null,
-        plan_id || null, tarifa_mensual || 0, costo_instalacion || 0,
-        fecha_instalacion || null, dia_corte || 10,
-        tecnico_instalador || null, notas_instalacion || null,
+        plan_id || null, tarifa, fecha_instalacion || null,
         req.usuario?.usuario_id || null
       ]
     );
 
-    // GENERAR CARGOS AUTOMÁTICOS si tiene fecha de instalación y tarifa
+    // GENERAR CARGOS AUTOMÁTICOS si el módulo está disponible
     let cargosGenerados = [];
-    if (fecha_instalacion && tarifa_mensual > 0) {
+    if (generarCargosIniciales && fecha_instalacion && tarifa > 0) {
       try {
         cargosGenerados = await generarCargosIniciales(
           id,
           fecha_instalacion,
-          parseFloat(tarifa_mensual),
+          parseFloat(tarifa),
           parseFloat(costo_instalacion) || 0
         );
       } catch (errCargos) {
@@ -204,7 +214,7 @@ async function actualizarCliente(req, res) {
       nombre, apellido_paterno, apellido_materno,
       telefono, telefono_secundario, email,
       ciudad_id, colonia_id, direccion, referencia,
-      plan_id, tarifa_mensual, dia_corte, estado
+      plan_id, tarifa_mensual, cuota_mensual, dia_corte, estado
     } = req.body;
 
     const pool = obtenerPool();
@@ -214,19 +224,22 @@ async function actualizarCliente(req, res) {
     if (!existe.length) {
       return res.status(404).json({ ok: false, mensaje: 'Cliente no encontrado' });
     }
+    
+    // Usar tarifa_mensual o cuota_mensual (compatibilidad)
+    const tarifa = tarifa_mensual || cuota_mensual || 0;
 
     await pool.query(
       `UPDATE clientes SET
         nombre = ?, apellido_paterno = ?, apellido_materno = ?,
         telefono = ?, telefono_secundario = ?, email = ?,
         ciudad_id = ?, colonia_id = ?, direccion = ?, referencia = ?,
-        plan_id = ?, tarifa_mensual = ?, dia_corte = ?, estado = ?
+        plan_id = ?, tarifa_mensual = ?, estado = ?
        WHERE id = ?`,
       [
         nombre, apellido_paterno || null, apellido_materno || null,
         telefono, telefono_secundario || null, email || null,
         ciudad_id || null, colonia_id || null, direccion || null, referencia || null,
-        plan_id || null, tarifa_mensual || 0, dia_corte || 10, estado || 'activo',
+        plan_id || null, tarifa, estado || 'activo',
         id
       ]
     );
@@ -272,25 +285,33 @@ async function obtenerEstadisticas(req, res) {
         COUNT(CASE WHEN estado = 'activo' THEN 1 END) as activos,
         COUNT(CASE WHEN estado = 'cancelado' THEN 1 END) as cancelados,
         COUNT(CASE WHEN estado = 'suspendido' THEN 1 END) as suspendidos,
-        SUM(tarifa_mensual) as ingreso_potencial
+        COALESCE(SUM(tarifa_mensual), 0) as ingreso_potencial
       FROM clientes
     `);
     
-    // Clientes con adeudo
-    const [adeudos] = await pool.query(`
-      SELECT COUNT(DISTINCT c.id) as con_adeudo
-      FROM clientes c
-      INNER JOIN cargos ca ON c.id = ca.cliente_id
-      WHERE ca.estado IN ('pendiente', 'parcial')
-        AND c.estado = 'activo'
-    `);
+    let clientesConAdeudo = 0;
+    let totalAdeudo = 0;
     
-    // Total adeudo
-    const [totalAdeudo] = await pool.query(`
-      SELECT COALESCE(SUM(saldo_pendiente), 0) as total
-      FROM cargos
-      WHERE estado IN ('pendiente', 'parcial')
-    `);
+    // Intentar obtener datos de cargos si la tabla existe
+    try {
+      const [adeudos] = await pool.query(`
+        SELECT COUNT(DISTINCT c.id) as con_adeudo
+        FROM clientes c
+        INNER JOIN cargos ca ON c.id = ca.cliente_id
+        WHERE ca.estado IN ('pendiente', 'parcial')
+          AND c.estado = 'activo'
+      `);
+      clientesConAdeudo = adeudos[0].con_adeudo || 0;
+      
+      const [total] = await pool.query(`
+        SELECT COALESCE(SUM(saldo_pendiente), 0) as total
+        FROM cargos
+        WHERE estado IN ('pendiente', 'parcial')
+      `);
+      totalAdeudo = parseFloat(total[0].total) || 0;
+    } catch (e) {
+      // Tabla cargos no existe aún
+    }
     
     res.json({
       ok: true,
@@ -298,9 +319,9 @@ async function obtenerEstadisticas(req, res) {
         clientes_activos: stats[0].activos || 0,
         clientes_cancelados: stats[0].cancelados || 0,
         clientes_suspendidos: stats[0].suspendidos || 0,
-        clientes_con_adeudo: adeudos[0].con_adeudo || 0,
+        clientes_con_adeudo: clientesConAdeudo,
         ingreso_potencial: parseFloat(stats[0].ingreso_potencial) || 0,
-        total_adeudo: parseFloat(totalAdeudo[0].total) || 0
+        total_adeudo: totalAdeudo
       }
     });
   } catch (err) {
