@@ -4,7 +4,6 @@ const cors = require('cors');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const path = require('path');
-
 const db = require('./config/database');
 const errorHandler = require('./middlewares/errorHandler');
 
@@ -21,6 +20,9 @@ const dashboardRoutes = require('./routes/dashboard.routes');
 const historialRoutes = require('./routes/historial.routes');
 
 const app = express();
+
+// Trust proxy (Heroku)
+app.set('trust proxy', 1);
 
 // Security
 app.use(helmet());
