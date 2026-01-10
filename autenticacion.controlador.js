@@ -7,9 +7,13 @@ const JWT_SECRET = process.env.JWT_SECRET || 'skynet_secreto_jwt_2024';
 // LOGIN
 async function login(req, res) {
   try {
-    const { usuario, contrasena } = req.body;
+    console.log('📥 Login request body:', req.body);
+    
+    const { usuario, contrasena, password } = req.body;
+    const clave = contrasena || password;
 
-    if (!usuario || !contrasena) {
+    if (!usuario || !clave) {
+      console.log('❌ Campos faltantes - usuario:', usuario, 'clave:', clave);
       return res.status(400).json({ ok: false, mensaje: 'Usuario y contraseña requeridos' });
     }
 
@@ -27,7 +31,7 @@ async function login(req, res) {
     }
 
     const user = rows[0];
-    const passwordValido = await bcrypt.compare(contrasena, user.hash_contrasena);
+    const passwordValido = await bcrypt.compare(clave, user.hash_contrasena);
 
     if (!passwordValido) {
       // Incrementar intentos fallidos
