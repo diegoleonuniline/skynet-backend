@@ -6,9 +6,9 @@ async function conectarDB() {
   try {
     pool = mysql.createPool({
       host: process.env.DB_HOST || 'localhost',
-      user: process.env.DB_USER || 'root',
-      password: process.env.DB_PASSWORD || '',
-      database: process.env.DB_NAME || 'skynet',
+      user: process.env.DB_USUARIO || 'root',
+      password: process.env.DB_CONTRASENA || '',
+      database: process.env.DB_NOMBRE || 'skynet',
       waitForConnections: true,
       connectionLimit: 10,
       queueLimit: 0
