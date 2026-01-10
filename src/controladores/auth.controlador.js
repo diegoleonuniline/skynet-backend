@@ -21,11 +21,22 @@ async function login(req, res) {
     }
 
     const user = rows[0];
-    const passValida = await bcrypt.compare(contrasena, user.contrasena);
+    const passValida = await bcrypt.compare(contrasena, user.hash_contrasena);
 
     if (!passValida) {
+      // Incrementar intentos fallidos
+      await pool.query(
+        'UPDATE usuarios SET intentos_fallidos = intentos_fallidos + 1 WHERE id = ?',
+        [user.id]
+      );
       return res.status(401).json({ ok: false, mensaje: 'Credenciales inválidas' });
     }
+
+    // Resetear intentos y actualizar ultimo_acceso
+    await pool.query(
+      'UPDATE usuarios SET intentos_fallidos = 0, ultimo_acceso = NOW() WHERE id = ?',
+      [user.id]
+    );
 
     res.json({
       ok: true,
@@ -33,8 +44,9 @@ async function login(req, res) {
       usuario: {
         id: user.id,
         usuario: user.usuario,
-        nombre: user.nombre,
-        rol: user.rol
+        nombre: user.nombre_completo,
+        correo: user.correo,
+        rol_id: user.rol_id
       }
     });
   } catch (err) {

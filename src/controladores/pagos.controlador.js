@@ -1,8 +1,6 @@
 const { obtenerPool } = require('../configuracion/base_datos');
 
-// ========================================
 // OBTENER PAGOS DE UN CLIENTE
-// ========================================
 async function obtenerPagosCliente(req, res) {
   try {
     const { cliente_id } = req.params;
@@ -20,9 +18,7 @@ async function obtenerPagosCliente(req, res) {
   }
 }
 
-// ========================================
 // OBTENER MENSUALIDADES DE UN CLIENTE
-// ========================================
 async function obtenerMensualidadesCliente(req, res) {
   try {
     const { cliente_id } = req.params;
@@ -40,9 +36,7 @@ async function obtenerMensualidadesCliente(req, res) {
   }
 }
 
-// ========================================
 // REGISTRAR PAGO
-// ========================================
 async function registrarPago(req, res) {
   const pool = obtenerPool();
   const connection = await pool.getConnection();
@@ -51,35 +45,44 @@ async function registrarPago(req, res) {
     await connection.beginTransaction();
 
     const {
-      cliente_id,
-      monto,
-      metodo_pago,
-      referencia,
-      notas,
-      mensualidad_id,
-      instalacion_id
+      cliente_id, monto, metodo_pago, referencia, notas,
+      mensualidad_id, instalacion_id,
+      numero_recibo, tipo_banco, banco, quien_paga, telefono_quien_paga, comprobante_url, observaciones
     } = req.body;
 
     if (!cliente_id || !monto) {
       return res.status(400).json({ ok: false, mensaje: 'Cliente y monto requeridos' });
     }
 
-    const pagoId = generarUUID();
+    // Determinar tipo de pago
+    let tipo = 'otro';
+    if (mensualidad_id) tipo = 'mensualidad';
+    else if (instalacion_id) tipo = 'instalacion';
 
     // Insertar pago
     await connection.query(
-      `INSERT INTO pagos (id, cliente_id, tipo, monto, metodo_pago, referencia, notas, mensualidad_id, instalacion_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [pagoId, cliente_id, mensualidad_id ? 'mensualidad' : (instalacion_id ? 'instalacion' : 'otro'),
-       monto, metodo_pago || 'efectivo', referencia || null, notas || null,
-       mensualidad_id || null, instalacion_id || null]
+      `INSERT INTO pagos (
+        cliente_id, tipo, monto, metodo_pago, referencia, notas,
+        mensualidad_id, instalacion_id,
+        numero_recibo, tipo_banco, banco, quien_paga, telefono_quien_paga, comprobante_url, observaciones
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        cliente_id, tipo, monto, metodo_pago || 'efectivo', referencia || null, notas || null,
+        mensualidad_id || null, instalacion_id || null,
+        numero_recibo || null, tipo_banco || null, banco || null, 
+        quien_paga || null, telefono_quien_paga || null, comprobante_url || null, observaciones || null
+      ]
     );
 
-    // Si es pago de mensualidad
+    // Obtener ID del pago
+    const [newPago] = await connection.query('SELECT id FROM pagos WHERE cliente_id = ? ORDER BY creado_en DESC LIMIT 1', [cliente_id]);
+    const pagoId = newPago[0].id;
+
+    // Actualizar mensualidad si aplica
     if (mensualidad_id) {
       const [mens] = await connection.query('SELECT * FROM mensualidades WHERE id = ?', [mensualidad_id]);
       if (mens.length) {
-        const nuevoMontoPagado = parseFloat(mens[0].monto_pagado) + parseFloat(monto);
+        const nuevoMontoPagado = parseFloat(mens[0].monto_pagado || 0) + parseFloat(monto);
         const nuevoEstado = nuevoMontoPagado >= parseFloat(mens[0].monto) ? 'pagado' : 'parcial';
         
         await connection.query(
@@ -89,7 +92,7 @@ async function registrarPago(req, res) {
       }
     }
 
-    // Si es pago de instalación
+    // Actualizar instalación si aplica
     if (instalacion_id) {
       const [inst] = await connection.query('SELECT * FROM instalaciones WHERE id = ?', [instalacion_id]);
       if (inst.length) {
@@ -115,15 +118,12 @@ async function registrarPago(req, res) {
   }
 }
 
-// ========================================
 // OBTENER ADEUDO DE CLIENTE
-// ========================================
 async function obtenerAdeudo(req, res) {
   try {
     const { cliente_id } = req.params;
     const pool = obtenerPool();
 
-    // Mensualidades pendientes
     const [mensualidades] = await pool.query(
       `SELECT * FROM mensualidades 
        WHERE cliente_id = ? AND estado IN ('pendiente', 'vencido', 'parcial')
@@ -131,7 +131,6 @@ async function obtenerAdeudo(req, res) {
       [cliente_id]
     );
 
-    // Instalación pendiente
     const [instalacion] = await pool.query(
       `SELECT * FROM instalaciones 
        WHERE cliente_id = ? AND estado IN ('pendiente', 'parcial')
@@ -161,13 +160,6 @@ async function obtenerAdeudo(req, res) {
     console.error('❌ Error:', err.message);
     res.status(500).json({ ok: false, mensaje: 'Error al obtener adeudo' });
   }
-}
-
-function generarUUID() {
-  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
-    const r = Math.random() * 16 | 0, v = c === 'x' ? r : (r & 0x3 | 0x8);
-    return v.toString(16);
-  });
 }
 
 module.exports = {

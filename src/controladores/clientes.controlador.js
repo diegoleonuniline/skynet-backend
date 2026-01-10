@@ -5,7 +5,7 @@ const { obtenerPool } = require('../configuracion/base_datos');
 // ========================================
 async function obtenerClientes(req, res) {
   try {
-    const { pagina = 1, limite = 10, estado, busqueda } = req.query;
+    const { pagina = 1, limite = 50, estado, busqueda } = req.query;
     const offset = (parseInt(pagina) - 1) * parseInt(limite);
     const pool = obtenerPool();
 
@@ -33,7 +33,8 @@ async function obtenerClientes(req, res) {
       `SELECT c.*, 
               ci.nombre as ciudad_nombre,
               co.nombre as colonia_nombre,
-              p.nombre as plan_nombre
+              p.nombre as plan_nombre,
+              p.precio_mensual as tarifa_plan
        FROM clientes c
        LEFT JOIN catalogo_ciudades ci ON ci.id = c.ciudad_id
        LEFT JOIN catalogo_colonias co ON co.id = c.colonia_id
@@ -84,7 +85,28 @@ async function obtenerCliente(req, res) {
       return res.status(404).json({ ok: false, mensaje: 'Cliente no encontrado' });
     }
 
-    res.json({ ok: true, cliente: rows[0] });
+    // Obtener equipos
+    const [equipos] = await pool.query('SELECT * FROM equipos WHERE cliente_id = ?', [id]);
+
+    // Obtener mensualidades
+    const [mensualidades] = await pool.query(
+      'SELECT * FROM mensualidades WHERE cliente_id = ? ORDER BY fecha_vencimiento DESC',
+      [id]
+    );
+
+    // Obtener instalación
+    const [instalacion] = await pool.query(
+      'SELECT * FROM instalaciones WHERE cliente_id = ? ORDER BY creado_en DESC LIMIT 1',
+      [id]
+    );
+
+    res.json({ 
+      ok: true, 
+      cliente: rows[0],
+      equipos,
+      mensualidades,
+      instalacion: instalacion[0] || null
+    });
   } catch (err) {
     console.error('❌ Error obtenerCliente:', err.message);
     res.status(500).json({ ok: false, mensaje: 'Error al obtener cliente' });
@@ -98,8 +120,10 @@ async function crearCliente(req, res) {
   try {
     const {
       nombre, apellido_paterno, apellido_materno,
-      telefono, telefono_secundario, email,
-      ciudad_id, colonia_id, direccion, referencia,
+      telefono, telefono_secundario, telefono_terciario, email,
+      ciudad_id, colonia_id, codigo_postal,
+      direccion, direccion_calle, direccion_numero, direccion_interior,
+      referencia, coordenadas_gps,
       plan_id, cuota_mensual
     } = req.body;
 
@@ -108,25 +132,35 @@ async function crearCliente(req, res) {
     }
 
     const pool = obtenerPool();
-    const id = generarUUID();
     const numero_cliente = await generarNumeroCliente(pool);
 
-    await pool.query(
+    const [result] = await pool.query(
       `INSERT INTO clientes (
-        id, numero_cliente, nombre, apellido_paterno, apellido_materno,
-        telefono, telefono_secundario, email,
-        ciudad_id, colonia_id, direccion, referencia,
+        numero_cliente, nombre, apellido_paterno, apellido_materno,
+        telefono, telefono_secundario, telefono_terciario, email,
+        ciudad_id, colonia_id, codigo_postal,
+        direccion, direccion_calle, direccion_numero, direccion_interior,
+        referencia, coordenadas_gps,
         plan_id, cuota_mensual
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
-        id, numero_cliente, nombre, apellido_paterno || null, apellido_materno || null,
-        telefono, telefono_secundario || null, email || null,
-        ciudad_id || null, colonia_id || null, direccion || null, referencia || null,
+        numero_cliente, nombre, apellido_paterno || null, apellido_materno || null,
+        telefono, telefono_secundario || null, telefono_terciario || null, email || null,
+        ciudad_id || null, colonia_id || null, codigo_postal || null,
+        direccion || null, direccion_calle || null, direccion_numero || null, direccion_interior || null,
+        referencia || null, coordenadas_gps || null,
         plan_id || null, cuota_mensual || 0
       ]
     );
 
-    res.json({ ok: true, mensaje: 'Cliente creado', cliente: { id, numero_cliente } });
+    // Obtener el ID del cliente recién creado
+    const [newClient] = await pool.query('SELECT id FROM clientes WHERE numero_cliente = ?', [numero_cliente]);
+
+    res.json({ 
+      ok: true, 
+      mensaje: 'Cliente creado', 
+      cliente: { id: newClient[0].id, numero_cliente } 
+    });
   } catch (err) {
     console.error('❌ Error crearCliente:', err.message);
     res.status(500).json({ ok: false, mensaje: 'Error al crear cliente' });
@@ -145,8 +179,10 @@ async function crearClienteConInstalacion(req, res) {
     
     const {
       nombre, apellido_paterno, apellido_materno,
-      telefono, telefono_secundario, email,
-      ciudad_id, colonia_id, direccion, referencia,
+      telefono, telefono_secundario, telefono_terciario, email,
+      ciudad_id, colonia_id, codigo_postal,
+      direccion, direccion_calle, direccion_numero, direccion_interior,
+      referencia, coordenadas_gps,
       plan_id, cuota_mensual, tarifa_mensual,
       fecha_instalacion, dia_corte, costo_instalacion,
       tecnico_instalador, notas_instalacion
@@ -160,7 +196,6 @@ async function crearClienteConInstalacion(req, res) {
       return res.status(400).json({ ok: false, mensaje: 'Fecha de instalación requerida' });
     }
 
-    const clienteId = generarUUID();
     const numero_cliente = await generarNumeroCliente(pool);
     const tarifa = parseFloat(tarifa_mensual) || parseFloat(cuota_mensual) || 0;
     const diaCorte = parseInt(dia_corte) || 10;
@@ -168,19 +203,29 @@ async function crearClienteConInstalacion(req, res) {
     // 1. Crear cliente
     await connection.query(
       `INSERT INTO clientes (
-        id, numero_cliente, nombre, apellido_paterno, apellido_materno,
-        telefono, telefono_secundario, email,
-        ciudad_id, colonia_id, direccion, referencia,
-        plan_id, cuota_mensual, dia_corte,
-        fecha_instalacion, estado
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'activo')`,
+        numero_cliente, nombre, apellido_paterno, apellido_materno,
+        telefono, telefono_secundario, telefono_terciario, email,
+        ciudad_id, colonia_id, codigo_postal,
+        direccion, direccion_calle, direccion_numero, direccion_interior,
+        referencia, coordenadas_gps,
+        plan_id, cuota_mensual, tarifa_mensual, dia_corte,
+        fecha_instalacion, costo_instalacion, tecnico_instalador, notas_instalacion,
+        estado
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'activo')`,
       [
-        clienteId, numero_cliente, nombre, apellido_paterno || null, apellido_materno || null,
-        telefono, telefono_secundario || null, email || null,
-        ciudad_id || null, colonia_id || null, direccion || null, referencia || null,
-        plan_id || null, tarifa, diaCorte, fecha_instalacion
+        numero_cliente, nombre, apellido_paterno || null, apellido_materno || null,
+        telefono, telefono_secundario || null, telefono_terciario || null, email || null,
+        ciudad_id || null, colonia_id || null, codigo_postal || null,
+        direccion || null, direccion_calle || null, direccion_numero || null, direccion_interior || null,
+        referencia || null, coordenadas_gps || null,
+        plan_id || null, tarifa, tarifa, diaCorte,
+        fecha_instalacion, costo_instalacion || 0, tecnico_instalador || null, notas_instalacion || null
       ]
     );
+
+    // Obtener ID del cliente
+    const [newClient] = await connection.query('SELECT id FROM clientes WHERE numero_cliente = ?', [numero_cliente]);
+    const clienteId = newClient[0].id;
 
     // 2. Calcular y generar cargos
     const fechaInst = new Date(fecha_instalacion + 'T12:00:00');
@@ -210,11 +255,12 @@ async function crearClienteConInstalacion(req, res) {
         const fechaVenc = new Date(anioProrrateo, mesProrrateo, diaCorte);
         
         await connection.query(
-          `INSERT INTO mensualidades (id, cliente_id, periodo, fecha_inicio, fecha_fin, fecha_vencimiento, monto, es_prorrateado, dias_prorrateados, estado)
-           VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, 'pendiente')`,
-          [generarUUID(), clienteId, periodo, fecha_instalacion, 
+          `INSERT INTO mensualidades (cliente_id, periodo, fecha_inicio, fecha_fin, fecha_vencimiento, monto, es_prorrateado, dias_prorrateados, estado, concepto, descripcion)
+           VALUES (?, ?, ?, ?, ?, ?, 1, ?, 'pendiente', 'Prorrateo', ?)`,
+          [clienteId, periodo, fecha_instalacion, 
            `${anioProrrateo}-${String(mesProrrateo + 1).padStart(2, '0')}-${ultimoDia}`,
-           fechaVenc.toISOString().split('T')[0], montoProrrateo.toFixed(2), diasProrrateo]
+           fechaVenc.toISOString().split('T')[0], montoProrrateo.toFixed(2), diasProrrateo,
+           `Prorrateo ${diasProrrateo} días`]
         );
         cargosGenerados++;
       }
@@ -223,9 +269,9 @@ async function crearClienteConInstalacion(req, res) {
     // Costo de instalación
     if (parseFloat(costo_instalacion) > 0) {
       await connection.query(
-        `INSERT INTO instalaciones (id, cliente_id, monto, fecha_instalacion, notas, estado)
-         VALUES (?, ?, ?, ?, ?, 'pendiente')`,
-        [generarUUID(), clienteId, costo_instalacion, fecha_instalacion, notas_instalacion || 'Instalación inicial']
+        `INSERT INTO instalaciones (cliente_id, monto, fecha_instalacion, notas, estado)
+         VALUES (?, ?, ?, ?, 'pendiente')`,
+        [clienteId, costo_instalacion, fecha_instalacion, notas_instalacion || 'Instalación inicial']
       );
       cargosGenerados++;
     }
@@ -240,17 +286,19 @@ async function crearClienteConInstalacion(req, res) {
         if (mesMensualidad > 11) { mesMensualidad = 0; anioMensualidad++; }
       }
       
+      const nombresMeses = ['Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'];
       const periodo = `${anioMensualidad}-${String(mesMensualidad + 1).padStart(2, '0')}`;
       const ultimoDia = new Date(anioMensualidad, mesMensualidad + 1, 0).getDate();
       const fechaVenc = new Date(anioMensualidad, mesMensualidad, diaCorte);
       
       await connection.query(
-        `INSERT INTO mensualidades (id, cliente_id, periodo, fecha_inicio, fecha_fin, fecha_vencimiento, monto, es_prorrateado, dias_prorrateados, estado)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, 'pendiente')`,
-        [generarUUID(), clienteId, periodo,
+        `INSERT INTO mensualidades (cliente_id, periodo, fecha_inicio, fecha_fin, fecha_vencimiento, monto, es_prorrateado, dias_prorrateados, estado, concepto, descripcion)
+         VALUES (?, ?, ?, ?, ?, ?, 0, 0, 'pendiente', 'Mensualidad', ?)`,
+        [clienteId, periodo,
          `${anioMensualidad}-${String(mesMensualidad + 1).padStart(2, '0')}-01`,
          `${anioMensualidad}-${String(mesMensualidad + 1).padStart(2, '0')}-${ultimoDia}`,
-         fechaVenc.toISOString().split('T')[0], tarifa]
+         fechaVenc.toISOString().split('T')[0], tarifa,
+         `Mensualidad ${nombresMeses[mesMensualidad]} ${anioMensualidad}`]
       );
       cargosGenerados++;
     }
@@ -267,7 +315,7 @@ async function crearClienteConInstalacion(req, res) {
   } catch (err) {
     await connection.rollback();
     console.error('❌ Error crearClienteConInstalacion:', err.message);
-    res.status(500).json({ ok: false, mensaje: 'Error al crear cliente con instalación', error: err.message });
+    res.status(500).json({ ok: false, mensaje: 'Error al crear cliente', error: err.message });
   } finally {
     connection.release();
   }
@@ -281,8 +329,10 @@ async function actualizarCliente(req, res) {
     const { id } = req.params;
     const {
       nombre, apellido_paterno, apellido_materno,
-      telefono, telefono_secundario, email,
-      ciudad_id, colonia_id, direccion, referencia,
+      telefono, telefono_secundario, telefono_terciario, email,
+      ciudad_id, colonia_id, codigo_postal,
+      direccion, direccion_calle, direccion_numero, direccion_interior,
+      referencia, coordenadas_gps,
       plan_id, cuota_mensual, dia_corte, estado
     } = req.body;
 
@@ -296,14 +346,18 @@ async function actualizarCliente(req, res) {
     await pool.query(
       `UPDATE clientes SET
         nombre = ?, apellido_paterno = ?, apellido_materno = ?,
-        telefono = ?, telefono_secundario = ?, email = ?,
-        ciudad_id = ?, colonia_id = ?, direccion = ?, referencia = ?,
+        telefono = ?, telefono_secundario = ?, telefono_terciario = ?, email = ?,
+        ciudad_id = ?, colonia_id = ?, codigo_postal = ?,
+        direccion = ?, direccion_calle = ?, direccion_numero = ?, direccion_interior = ?,
+        referencia = ?, coordenadas_gps = ?,
         plan_id = ?, cuota_mensual = ?, dia_corte = ?, estado = ?
        WHERE id = ?`,
       [
         nombre, apellido_paterno || null, apellido_materno || null,
-        telefono, telefono_secundario || null, email || null,
-        ciudad_id || null, colonia_id || null, direccion || null, referencia || null,
+        telefono, telefono_secundario || null, telefono_terciario || null, email || null,
+        ciudad_id || null, colonia_id || null, codigo_postal || null,
+        direccion || null, direccion_calle || null, direccion_numero || null, direccion_interior || null,
+        referencia || null, coordenadas_gps || null,
         plan_id || null, cuota_mensual || 0, dia_corte || 10, estado || 'activo',
         id
       ]
@@ -352,12 +406,14 @@ async function registrarInstalacion(req, res) {
     await connection.query(
       `UPDATE clientes SET 
         fecha_instalacion = ?, dia_corte = ?, plan_id = COALESCE(?, plan_id),
-        cuota_mensual = ?
+        cuota_mensual = ?, tarifa_mensual = ?,
+        costo_instalacion = ?, tecnico_instalador = ?, notas_instalacion = ?
        WHERE id = ?`,
-      [fecha_instalacion, diaCorte, plan_id, tarifa, id]
+      [fecha_instalacion, diaCorte, plan_id, tarifa, tarifa,
+       costo_instalacion || 0, tecnico_instalador || null, notas_instalacion || null, id]
     );
 
-    // 2. Generar cargos
+    // 2. Generar cargos (misma lógica que crearClienteConInstalacion)
     const fechaInst = new Date(fecha_instalacion + 'T12:00:00');
     const diaInstalacion = fechaInst.getDate();
     const mes = fechaInst.getMonth();
@@ -385,11 +441,12 @@ async function registrarInstalacion(req, res) {
         const fechaVenc = new Date(anioProrrateo, mesProrrateo, diaCorte);
         
         await connection.query(
-          `INSERT INTO mensualidades (id, cliente_id, periodo, fecha_inicio, fecha_fin, fecha_vencimiento, monto, es_prorrateado, dias_prorrateados, estado)
-           VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, 'pendiente')`,
-          [generarUUID(), id, periodo, fecha_instalacion, 
+          `INSERT INTO mensualidades (cliente_id, periodo, fecha_inicio, fecha_fin, fecha_vencimiento, monto, es_prorrateado, dias_prorrateados, estado, concepto, descripcion)
+           VALUES (?, ?, ?, ?, ?, ?, 1, ?, 'pendiente', 'Prorrateo', ?)`,
+          [id, periodo, fecha_instalacion, 
            `${anioProrrateo}-${String(mesProrrateo + 1).padStart(2, '0')}-${ultimoDia}`,
-           fechaVenc.toISOString().split('T')[0], montoProrrateo.toFixed(2), diasProrrateo]
+           fechaVenc.toISOString().split('T')[0], montoProrrateo.toFixed(2), diasProrrateo,
+           `Prorrateo ${diasProrrateo} días`]
         );
         cargosGenerados++;
       }
@@ -398,9 +455,9 @@ async function registrarInstalacion(req, res) {
     // Costo instalación
     if (parseFloat(costo_instalacion) > 0) {
       await connection.query(
-        `INSERT INTO instalaciones (id, cliente_id, monto, fecha_instalacion, notas, estado)
-         VALUES (?, ?, ?, ?, ?, 'pendiente')`,
-        [generarUUID(), id, costo_instalacion, fecha_instalacion, notas_instalacion || 'Instalación']
+        `INSERT INTO instalaciones (cliente_id, monto, fecha_instalacion, notas, estado)
+         VALUES (?, ?, ?, ?, 'pendiente')`,
+        [id, costo_instalacion, fecha_instalacion, notas_instalacion || 'Instalación']
       );
       cargosGenerados++;
     }
@@ -415,17 +472,19 @@ async function registrarInstalacion(req, res) {
         if (mesMensualidad > 11) { mesMensualidad = 0; anioMensualidad++; }
       }
       
+      const nombresMeses = ['Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'];
       const periodo = `${anioMensualidad}-${String(mesMensualidad + 1).padStart(2, '0')}`;
       const ultimoDia = new Date(anioMensualidad, mesMensualidad + 1, 0).getDate();
       const fechaVenc = new Date(anioMensualidad, mesMensualidad, diaCorte);
       
       await connection.query(
-        `INSERT INTO mensualidades (id, cliente_id, periodo, fecha_inicio, fecha_fin, fecha_vencimiento, monto, es_prorrateado, dias_prorrateados, estado)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, 'pendiente')`,
-        [generarUUID(), id, periodo,
+        `INSERT INTO mensualidades (cliente_id, periodo, fecha_inicio, fecha_fin, fecha_vencimiento, monto, es_prorrateado, dias_prorrateados, estado, concepto, descripcion)
+         VALUES (?, ?, ?, ?, ?, ?, 0, 0, 'pendiente', 'Mensualidad', ?)`,
+        [id, periodo,
          `${anioMensualidad}-${String(mesMensualidad + 1).padStart(2, '0')}-01`,
          `${anioMensualidad}-${String(mesMensualidad + 1).padStart(2, '0')}-${ultimoDia}`,
-         fechaVenc.toISOString().split('T')[0], tarifa]
+         fechaVenc.toISOString().split('T')[0], tarifa,
+         `Mensualidad ${nombresMeses[mesMensualidad]} ${anioMensualidad}`]
       );
       cargosGenerados++;
     }
@@ -468,18 +527,11 @@ async function eliminarCliente(req, res) {
 // ========================================
 // HELPERS
 // ========================================
-function generarUUID() {
-  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
-    const r = Math.random() * 16 | 0, v = c === 'x' ? r : (r & 0x3 | 0x8);
-    return v.toString(16);
-  });
-}
-
 async function generarNumeroCliente(pool) {
   const [rows] = await pool.query(
-    `SELECT numero_cliente FROM clientes ORDER BY creado_en DESC LIMIT 1`
+    `SELECT numero_cliente FROM clientes WHERE numero_cliente IS NOT NULL ORDER BY creado_en DESC LIMIT 1`
   );
-  if (!rows.length) return 'CLI-0001';
+  if (!rows.length || !rows[0].numero_cliente) return 'CLI-0001';
   const ultimo = rows[0].numero_cliente;
   const num = parseInt(ultimo.split('-')[1]) + 1;
   return `CLI-${num.toString().padStart(4, '0')}`;

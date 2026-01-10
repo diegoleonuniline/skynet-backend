@@ -4,8 +4,7 @@
   "description": "API Skynet ISP",
   "main": "src/servidor.js",
   "scripts": {
-    "start": "node src/servidor.js",
-    "dev": "nodemon src/servidor.js"
+    "start": "node src/servidor.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",

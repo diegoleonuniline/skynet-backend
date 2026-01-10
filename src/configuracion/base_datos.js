@@ -5,16 +5,15 @@ let pool = null;
 async function conectarDB() {
   try {
     pool = mysql.createPool({
-      host: process.env.DB_HOST || 'localhost',
-      user: process.env.DB_USUARIO || 'root',
-      password: process.env.DB_CONTRASENA || '',
-      database: process.env.DB_NOMBRE || 'skynet',
+      host: process.env.DB_HOST,
+      user: process.env.DB_USUARIO,
+      password: process.env.DB_CONTRASENA,
+      database: process.env.DB_NOMBRE,
       waitForConnections: true,
       connectionLimit: 10,
       queueLimit: 0
     });
     
-    // Probar conexión
     const connection = await pool.getConnection();
     console.log('✅ Conectado a MySQL');
     connection.release();

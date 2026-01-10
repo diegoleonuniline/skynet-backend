@@ -3,24 +3,16 @@ const cors = require('cors');
 
 const app = express();
 
-// Middlewares
 app.use(cors());
 app.use(express.json());
 
 // Rutas
-const authRutas = require('./rutas/auth.rutas');
-const catalogosRutas = require('./rutas/catalogos.rutas');
-const clientesRutas = require('./rutas/clientes.rutas');
-const dashboardRutas = require('./rutas/dashboard.rutas');
-const pagosRutas = require('./rutas/pagos.rutas');
+app.use('/api/auth', require('./rutas/auth.rutas'));
+app.use('/api/catalogos', require('./rutas/catalogos.rutas'));
+app.use('/api/clientes', require('./rutas/clientes.rutas'));
+app.use('/api/dashboard', require('./rutas/dashboard.rutas'));
+app.use('/api/pagos', require('./rutas/pagos.rutas'));
 
-app.use('/api/auth', authRutas);
-app.use('/api/catalogos', catalogosRutas);
-app.use('/api/clientes', clientesRutas);
-app.use('/api/dashboard', dashboardRutas);
-app.use('/api/pagos', pagosRutas);
-
-// Ruta de prueba
 app.get('/', (req, res) => {
   res.json({ ok: true, mensaje: 'API Skynet funcionando' });
 });

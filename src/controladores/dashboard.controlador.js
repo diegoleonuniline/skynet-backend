@@ -4,12 +4,10 @@ async function obtenerEstadisticas(req, res) {
   try {
     const pool = obtenerPool();
 
-    // Total clientes por estado
     const [clientesEstado] = await pool.query(`
       SELECT estado, COUNT(*) as total FROM clientes GROUP BY estado
     `);
 
-    // Ingresos del mes
     const [ingresosMes] = await pool.query(`
       SELECT COALESCE(SUM(monto), 0) as total 
       FROM pagos 
@@ -17,13 +15,11 @@ async function obtenerEstadisticas(req, res) {
       AND YEAR(fecha_pago) = YEAR(CURRENT_DATE())
     `);
 
-    // Mensualidades pendientes
     const [pendientes] = await pool.query(`
       SELECT COUNT(*) as total, COALESCE(SUM(monto - monto_pagado), 0) as monto
       FROM mensualidades WHERE estado IN ('pendiente', 'vencido')
     `);
 
-    // Instalaciones pendientes
     const [instalacionesPend] = await pool.query(`
       SELECT COUNT(*) as total FROM instalaciones WHERE estado = 'pendiente'
     `);
