@@ -1,5 +1,16 @@
 const db = require('../config/database');
 const { registrarCambio, logActividad, getClientIp, generarCodigo, paginate, response } = require('../utils/helpers');
+const cloudinary = require('cloudinary').v2;
+
+// Configurar Cloudinary
+cloudinary.config({
+    cloud_name: 'dnodzj8fz',
+    api_key: '359224572738431',
+    api_secret: 'Xjto7geI0Vrd_h9vQeakhHtYLYA'
+});
+
+// Helper: convertir strings vacíos a NULL
+const toNull = (val) => (val === '' || val === undefined || val === 'null' || val === 'undefined') ? null : val;
 
 const getAll = async (req, res, next) => {
     try {
@@ -103,8 +114,9 @@ const getById = async (req, res, next) => {
             return response.error(res, 'Cliente no encontrado', 404);
         }
 
+        // Obtener servicios con tarifa
         const [servicios] = await db.query(
-            `SELECT s.*, t.nombre as tarifa, t.monto as tarifa_monto,
+            `SELECT s.*, t.nombre as tarifa_nombre, t.monto as tarifa_monto,
                     es.nombre as estatus, es.color as estatus_color
              FROM servicios s
              LEFT JOIN cat_tarifas t ON s.tarifa_id = t.id
@@ -113,7 +125,51 @@ const getById = async (req, res, next) => {
             [req.params.id]
         );
 
-        response.success(res, { ...clientes[0], servicios });
+        // Obtener INEs
+        const [ines] = await db.query(
+            `SELECT id, tipo, archivo_nombre, archivo_path, created_at
+             FROM cliente_ine WHERE cliente_id = ? AND is_active = 1 AND deleted_at IS NULL`,
+            [req.params.id]
+        );
+
+        // Formatear INEs para el frontend
+        const ineData = {
+            ine_frente: null,
+            ine_frente_fecha: null,
+            ine_reverso: null,
+            ine_reverso_fecha: null
+        };
+
+        ines.forEach(ine => {
+            if (ine.tipo === 'FRENTE') {
+                ineData.ine_frente = ine.archivo_path;
+                ineData.ine_frente_fecha = ine.created_at;
+            } else if (ine.tipo === 'REVERSO') {
+                ineData.ine_reverso = ine.archivo_path;
+                ineData.ine_reverso_fecha = ine.created_at;
+            }
+        });
+
+        // Calcular saldo
+        const [saldoResult] = await db.query(
+            `SELECT COALESCE(SUM(saldo), 0) as saldo FROM saldos_cliente WHERE cliente_id = ?`,
+            [req.params.id]
+        );
+
+        // Obtener tarifa del primer servicio activo
+        let tarifaInfo = { tarifa_nombre: null, tarifa_monto: null };
+        if (servicios.length > 0) {
+            tarifaInfo.tarifa_nombre = servicios[0].tarifa_nombre;
+            tarifaInfo.tarifa_monto = servicios[0].tarifa_monto;
+        }
+
+        response.success(res, { 
+            ...clientes[0], 
+            servicios,
+            ...ineData,
+            ...tarifaInfo,
+            saldo: saldoResult[0]?.saldo || 0
+        });
     } catch (error) {
         next(error);
     }
@@ -146,9 +202,25 @@ const create = async (req, res, next) => {
              telefono1, telefono2, telefono3_subcliente, calle, numero_exterior, numero_interior,
              colonia_id, ciudad_id, estado_id, codigo_postal, zona_id, estatus_id, created_by)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-            [codigo, nombre, apellido_paterno, apellido_materno, telefono1, telefono2, telefono3_subcliente,
-             calle, numero_exterior, numero_interior, colonia_id, ciudad_id, estado_id, codigo_postal,
-             zona_id, estatusActivo[0]?.id || 1, req.userId]
+            [
+                codigo, 
+                nombre, 
+                toNull(apellido_paterno), 
+                toNull(apellido_materno), 
+                toNull(telefono1), 
+                toNull(telefono2), 
+                toNull(telefono3_subcliente),
+                toNull(calle), 
+                toNull(numero_exterior), 
+                toNull(numero_interior), 
+                toNull(colonia_id), 
+                toNull(ciudad_id), 
+                toNull(estado_id), 
+                toNull(codigo_postal),
+                toNull(zona_id), 
+                estatusActivo[0]?.id || 1, 
+                req.userId
+            ]
         );
 
         await conn.commit();
@@ -188,10 +260,13 @@ const update = async (req, res, next) => {
         const cambios = [];
 
         for (const campo of campos) {
-            if (req.body[campo] !== undefined && req.body[campo] !== old[campo]) {
-                updates.push(`${campo} = ?`);
-                values.push(req.body[campo]);
-                cambios.push({ campo, anterior: old[campo], nuevo: req.body[campo] });
+            if (req.body[campo] !== undefined) {
+                const nuevoValor = toNull(req.body[campo]);
+                if (nuevoValor !== old[campo]) {
+                    updates.push(`${campo} = ?`);
+                    values.push(nuevoValor);
+                    cambios.push({ campo, anterior: old[campo], nuevo: nuevoValor });
+                }
             }
         }
 
@@ -247,35 +322,74 @@ const deleteCliente = async (req, res, next) => {
     }
 };
 
+// ============================================
+// INE - CLOUDINARY
+// ============================================
+
 const uploadINE = async (req, res, next) => {
     try {
         const { id } = req.params;
-        const { tipo } = req.body; // FRENTE o REVERSO
+        const { tipo } = req.body;
 
         if (!req.file) {
             return response.error(res, 'Archivo requerido', 400);
         }
 
-        if (!tipo || !['FRENTE', 'REVERSO'].includes(tipo)) {
+        if (!tipo || !['FRENTE', 'REVERSO'].includes(tipo.toUpperCase())) {
             return response.error(res, 'Tipo debe ser FRENTE o REVERSO', 400);
         }
 
+        const tipoUpper = tipo.toUpperCase();
+
+        // Verificar que el cliente existe
+        const [cliente] = await db.query(`SELECT codigo FROM clientes WHERE id = ? AND deleted_at IS NULL`, [id]);
+        if (cliente.length === 0) {
+            return response.error(res, 'Cliente no encontrado', 404);
+        }
+
+        // Subir a Cloudinary
+        const result = await new Promise((resolve, reject) => {
+            const uploadStream = cloudinary.uploader.upload_stream(
+                {
+                    folder: `skynet/ine/${cliente[0].codigo}`,
+                    public_id: `${tipoUpper}_${Date.now()}`,
+                    resource_type: 'image',
+                    transformation: [
+                        { quality: 'auto:good' },
+                        { fetch_format: 'auto' }
+                    ]
+                },
+                (error, result) => {
+                    if (error) reject(error);
+                    else resolve(result);
+                }
+            );
+            uploadStream.end(req.file.buffer);
+        });
+
+        // Desactivar INE anterior del mismo tipo
         await db.query(
             `UPDATE cliente_ine SET is_active = 0, deleted_at = NOW(), deleted_by = ?
              WHERE cliente_id = ? AND tipo = ? AND is_active = 1`,
-            [req.userId, id, tipo]
+            [req.userId, id, tipoUpper]
         );
 
+        // Insertar nuevo registro
         await db.query(
             `INSERT INTO cliente_ine (cliente_id, tipo, archivo_nombre, archivo_path, archivo_size, created_by)
              VALUES (?, ?, ?, ?, ?, ?)`,
-            [id, tipo, req.file.originalname, req.file.path, req.file.size, req.userId]
+            [id, tipoUpper, req.file.originalname, result.secure_url, req.file.size, req.userId]
         );
 
-        await logActividad(req.userId, 'SUBIR_INE', 'CLIENTES', `INE ${tipo} subida para cliente: ${id}`, getClientIp(req));
+        await logActividad(req.userId, 'SUBIR_INE', 'CLIENTES', `INE ${tipoUpper} subida para cliente: ${id}`, getClientIp(req));
 
-        response.success(res, { path: req.file.path }, 'INE subida');
+        response.success(res, { 
+            url: result.secure_url,
+            public_id: result.public_id,
+            tipo: tipoUpper
+        }, 'INE subida correctamente');
     } catch (error) {
+        console.error('Error subiendo INE a Cloudinary:', error);
         next(error);
     }
 };
@@ -298,6 +412,23 @@ const deleteINE = async (req, res, next) => {
     try {
         const { id, ineId } = req.params;
 
+        // Obtener info del INE para eliminar de Cloudinary
+        const [ine] = await db.query(
+            `SELECT archivo_path FROM cliente_ine WHERE id = ? AND cliente_id = ?`,
+            [ineId, id]
+        );
+
+        if (ine.length > 0 && ine[0].archivo_path && ine[0].archivo_path.includes('cloudinary')) {
+            try {
+                // Extraer public_id de la URL de Cloudinary
+                const urlParts = ine[0].archivo_path.split('/');
+                const folderAndFile = urlParts.slice(-4).join('/').replace(/\.[^/.]+$/, '');
+                await cloudinary.uploader.destroy(folderAndFile);
+            } catch (cloudErr) {
+                console.error('Error eliminando de Cloudinary:', cloudErr);
+            }
+        }
+
         await db.query(
             `UPDATE cliente_ine SET is_active = 0, deleted_at = NOW(), deleted_by = ?
              WHERE id = ? AND cliente_id = ?`,
@@ -309,6 +440,10 @@ const deleteINE = async (req, res, next) => {
         next(error);
     }
 };
+
+// ============================================
+// NOTAS
+// ============================================
 
 const getNotas = async (req, res, next) => {
     try {
@@ -341,6 +476,8 @@ const addNota = async (req, res, next) => {
             [id, nota, req.userId]
         );
 
+        await logActividad(req.userId, 'AGREGAR_NOTA', 'CLIENTES', `Nota agregada al cliente: ${id}`, getClientIp(req));
+
         response.success(res, { id: result.insertId }, 'Nota agregada', 201);
     } catch (error) {
         next(error);
@@ -363,6 +500,10 @@ const deleteNota = async (req, res, next) => {
     }
 };
 
+// ============================================
+// HISTORIAL
+// ============================================
+
 const getHistorial = async (req, res, next) => {
     try {
         const { page = 1, limit = 50 } = req.query;
@@ -383,6 +524,10 @@ const getHistorial = async (req, res, next) => {
         next(error);
     }
 };
+
+// ============================================
+// CANCELAR / REACTIVAR
+// ============================================
 
 const cancelar = async (req, res, next) => {
     const conn = await db.getConnection();

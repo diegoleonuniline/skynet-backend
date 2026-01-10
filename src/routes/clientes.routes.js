@@ -3,18 +3,15 @@ const router = express.Router();
 const clientesController = require('../controllers/clientes.controller');
 const { auth, hasPermission, canAccessZone } = require('../middlewares/auth');
 const multer = require('multer');
-const path = require('path');
 
-const storage = multer.diskStorage({
-    destination: (req, file, cb) => cb(null, 'uploads/ine'),
-    filename: (req, file, cb) => cb(null, `${Date.now()}-${file.originalname}`)
-});
+// Multer en memoria para Cloudinary
+const storage = multer.memoryStorage();
 const upload = multer({ 
     storage, 
-    limits: { fileSize: 5 * 1024 * 1024 },
+    limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
     fileFilter: (req, file, cb) => {
-        const ext = path.extname(file.originalname).toLowerCase();
-        if (['.jpg', '.jpeg', '.png', '.pdf'].includes(ext)) {
+        const allowedTypes = ['image/jpeg', 'image/jpg', 'image/png', 'application/pdf'];
+        if (allowedTypes.includes(file.mimetype)) {
             cb(null, true);
         } else {
             cb(new Error('Solo se permiten imágenes JPG, PNG o PDF'));
@@ -22,9 +19,11 @@ const upload = multer({
     }
 });
 
+// Middleware de autenticación
 router.use(auth);
 router.use(canAccessZone);
 
+// CRUD Clientes
 router.get('/', hasPermission('CLIENTES', 'LEER'), clientesController.getAll);
 router.get('/buscar', hasPermission('CLIENTES', 'LEER'), clientesController.buscar);
 router.get('/:id', hasPermission('CLIENTES', 'LEER'), clientesController.getById);
@@ -32,8 +31,8 @@ router.post('/', hasPermission('CLIENTES', 'CREAR'), clientesController.create);
 router.put('/:id', hasPermission('CLIENTES', 'EDITAR'), clientesController.update);
 router.delete('/:id', hasPermission('CLIENTES', 'ELIMINAR'), clientesController.delete);
 
-// INE
-router.post('/:id/ine', hasPermission('CLIENTES', 'EDITAR'), upload.single('ine'), clientesController.uploadINE);
+// INE (Cloudinary)
+router.post('/:id/ine', hasPermission('CLIENTES', 'EDITAR'), upload.single('archivo'), clientesController.uploadINE);
 router.get('/:id/ine', hasPermission('CLIENTES', 'LEER'), clientesController.getINE);
 router.delete('/:id/ine/:ineId', hasPermission('CLIENTES', 'EDITAR'), clientesController.deleteINE);
 
