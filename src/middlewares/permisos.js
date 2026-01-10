@@ -1,84 +1,64 @@
-// Permisos por rol - Control desde backend
 const PERMISOS = {
   Administrador: {
-    clientes: ['crear', 'leer', 'editar', 'eliminar', 'historial'],
-    servicios: ['crear', 'leer', 'editar', 'eliminar', 'historial'],
-    instalaciones: ['crear', 'leer', 'editar', 'eliminar'],
-    equipos: ['crear', 'leer', 'editar', 'eliminar'],
-    cargos: ['crear', 'leer', 'editar', 'eliminar'],
-    pagos: ['crear', 'leer', 'editar', 'eliminar', 'historial'],
-    reportes: ['leer', 'exportar'],
-    usuarios: ['crear', 'leer', 'editar', 'eliminar'],
-    catalogos: ['crear', 'leer', 'editar', 'eliminar'],
-    auditoria: ['leer']
+    clientes: ['leer', 'crear', 'editar', 'eliminar'],
+    servicios: ['leer', 'crear', 'editar', 'eliminar'],
+    pagos: ['leer', 'crear', 'editar', 'eliminar', 'historial'],
+    cargos: ['leer', 'crear', 'editar', 'eliminar'],
+    equipos: ['leer', 'crear', 'editar', 'eliminar'],
+    instalaciones: ['leer', 'crear', 'editar', 'eliminar'],
+    usuarios: ['leer', 'crear', 'editar', 'eliminar'],
+    reportes: ['leer'],
+    catalogos: ['leer', 'crear', 'editar', 'eliminar']
   },
   Empleado: {
-    clientes: ['crear', 'leer'],
+    clientes: ['leer', 'crear'],
     servicios: ['leer'],
-    instalaciones: ['leer'],
-    equipos: ['leer'],
+    pagos: ['leer', 'crear'],
     cargos: ['leer'],
-    pagos: ['crear'],
-    reportes: [],
+    equipos: ['leer'],
+    instalaciones: ['leer'],
     usuarios: [],
-    catalogos: ['leer'],
-    auditoria: []
-  },
-  Tecnico: {
-    clientes: ['leer'],
-    servicios: ['leer'],
-    instalaciones: ['leer', 'editar'],
-    equipos: ['crear', 'leer', 'editar'],
-    cargos: [],
-    pagos: [],
     reportes: [],
-    usuarios: [],
-    catalogos: ['leer'],
-    auditoria: []
+    catalogos: ['leer']
   }
+};
+
+const getPermisosUsuario = (rol) => {
+  return PERMISOS[rol] || PERMISOS.Empleado;
 };
 
 const checkPermiso = (modulo, accion) => {
   return (req, res, next) => {
-    const rol = req.user.rol_nombre;
+    const rol = req.user?.rol_nombre || 'Empleado';
+    const permisos = PERMISOS[rol] || PERMISOS.Empleado;
     
-    if (!PERMISOS[rol]) {
-      return res.status(403).json({
-        success: false,
-        message: 'Rol no reconocido'
-      });
+    if (permisos[modulo]?.includes(accion)) {
+      return next();
     }
     
-    const permisosModulo = PERMISOS[rol][modulo];
-    
-    if (!permisosModulo || !permisosModulo.includes(accion)) {
-      return res.status(403).json({
-        success: false,
-        message: 'No tienes permiso para realizar esta acción'
-      });
-    }
-    
-    next();
+    return res.status(403).json({
+      success: false,
+      message: 'No tienes permiso para realizar esta acción'
+    });
   };
 };
 
 const soloAdmin = (req, res, next) => {
-  if (req.user.rol_nombre !== 'Administrador') {
-    return res.status(403).json({
-      success: false,
-      message: 'Acceso restringido a administradores'
-    });
+  const rol = req.user?.rol_nombre;
+  
+  if (rol === 'Administrador') {
+    return next();
   }
-  next();
-};
-
-const getPermisosUsuario = (rol) => {
-  return PERMISOS[rol] || {};
+  
+  return res.status(403).json({
+    success: false,
+    message: 'Solo administradores pueden realizar esta acción'
+  });
 };
 
 module.exports = {
-  checkPermiso,
-  soloAdmin,
+  PERMISOS,
   getPermisosUsuario,
-  PERMISOS
+  checkPermiso,
+  soloAdmin
 };

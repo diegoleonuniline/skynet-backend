@@ -1,317 +1,132 @@
 const pool = require('../config/database');
+const { v4: uuidv4 } = require('uuid');
 
-// Mapeo de catálogos disponibles
+// Mapeo de nombres de catálogos a tablas
 const CATALOGOS = {
-  roles: 'cat_roles',
-  estados_usuario: 'cat_estados_usuario',
-  estados_cliente: 'cat_estados_cliente',
-  estados_servicio: 'cat_estados_servicio',
-  estados_instalacion: 'cat_estados_instalacion',
-  estados_cargo: 'cat_estados_cargo',
-  estados_pago: 'cat_estados_pago',
-  tipos_cargo: 'cat_tipos_cargo',
-  tipos_pago: 'cat_tipos_pago',
-  ciudades: 'cat_ciudades',
-  colonias: 'cat_colonias',
-  tarifas: 'cat_tarifas'
+  roles: 'catalogo_roles',
+  ciudades: 'catalogo_ciudades',
+  colonias: 'catalogo_colonias',
+  tipos_pago: 'catalogo_metodos_pago',
+  tipos_cargo: 'catalogo_tipos_cargo',
+  tipos_equipo: 'catalogo_tipos_equipo',
+  tarifas: 'catalogo_tarifas',
+  bancos: 'catalogo_bancos',
+  // Estados - si no existen tablas, usamos valores fijos
+  estados_cliente: null,
+  estados_usuario: null,
+  estados_servicio: null,
+  estados_instalacion: null
 };
 
-// Listar todos los catálogos disponibles
-const catalogosDisponibles = async (req, res) => {
-  res.json({
-    success: true,
-    data: Object.keys(CATALOGOS)
-  });
+// Estados fijos (ya que no hay tablas de estados)
+const ESTADOS_FIJOS = {
+  estados_cliente: [
+    { id: '1', nombre: 'Activo' },
+    { id: '2', nombre: 'Suspendido' },
+    { id: '3', nombre: 'Cancelado' }
+  ],
+  estados_usuario: [
+    { id: '1', nombre: 'Activo' },
+    { id: '2', nombre: 'Inactivo' }
+  ],
+  estados_servicio: [
+    { id: '1', nombre: 'Activo' },
+    { id: '2', nombre: 'Suspendido' },
+    { id: '3', nombre: 'Cancelado' }
+  ],
+  estados_instalacion: [
+    { id: '1', nombre: 'Programada' },
+    { id: '2', nombre: 'Completada' },
+    { id: '3', nombre: 'Cancelada' }
+  ]
 };
 
-// Obtener items de un catálogo
-const obtenerCatalogo = async (req, res) => {
+const listar = async (req, res) => {
   try {
     const { catalogo } = req.params;
-    const { activos_solo = 'true', ciudad_id } = req.query;
+    const { ciudad_id } = req.query;
+    
+    // Si es un estado fijo
+    if (ESTADOS_FIJOS[catalogo]) {
+      return res.json({ success: true, data: ESTADOS_FIJOS[catalogo] });
+    }
     
     const tabla = CATALOGOS[catalogo];
-    
     if (!tabla) {
-      return res.status(404).json({
-        success: false,
-        message: 'Catálogo no encontrado'
-      });
+      return res.status(400).json({ success: false, message: 'Catálogo no válido' });
     }
     
-    let query = `SELECT * FROM ${tabla}`;
+    let query = `SELECT * FROM ${tabla} WHERE activo = 1`;
     const params = [];
     
-    if (activos_solo === 'true') {
-      query += ` WHERE activo = 1`;
-    }
-    
-    // Filtro especial para colonias por ciudad
     if (catalogo === 'colonias' && ciudad_id) {
-      query += activos_solo === 'true' ? ' AND' : ' WHERE';
-      query += ` ciudad_id = ?`;
+      query += ` AND ciudad_id = ?`;
       params.push(ciudad_id);
     }
     
-    query += ` ORDER BY nombre ASC`;
+    query += ` ORDER BY nombre`;
     
-    const [items] = await pool.query(query, params);
+    const [rows] = await pool.query(query, params);
     
-    res.json({
-      success: true,
-      data: items
-    });
+    // Para tarifas, agregar campos adicionales
+    if (catalogo === 'tarifas') {
+      for (let row of rows) {
+        row.precio_mensual = row.precio;
+      }
+    }
     
+    res.json({ success: true, data: rows });
   } catch (error) {
-    console.error('Error obteniendo catálogo:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error al obtener catálogo'
-    });
+    console.error('Error listando catálogo:', error);
+    res.status(500).json({ success: false, message: 'Error al listar catálogo' });
   }
 };
 
-// Agregar item a catálogo (solo admin)
-const agregarItem = async (req, res) => {
+const crear = async (req, res) => {
   try {
     const { catalogo } = req.params;
-    const datos = req.body;
+    const { nombre, descripcion, ciudad_id, precio, velocidad_mbps } = req.body;
     
-    if (req.user.rol_nombre !== 'Administrador') {
-      return res.status(403).json({
-        success: false,
-        message: 'No tienes permiso para modificar catálogos'
-      });
+    if (ESTADOS_FIJOS[catalogo]) {
+      return res.status(400).json({ success: false, message: 'No se puede modificar este catálogo' });
     }
     
     const tabla = CATALOGOS[catalogo];
-    
     if (!tabla) {
-      return res.status(404).json({
-        success: false,
-        message: 'Catálogo no encontrado'
-      });
+      return res.status(400).json({ success: false, message: 'Catálogo no válido' });
     }
     
-    // Campos base que todos los catálogos tienen
-    const campos = ['nombre'];
-    const valores = [datos.nombre];
-    const placeholders = ['?'];
-    
-    // Campos adicionales según el catálogo
-    if (datos.descripcion !== undefined) {
-      campos.push('descripcion');
-      valores.push(datos.descripcion);
-      placeholders.push('?');
+    if (!nombre) {
+      return res.status(400).json({ success: false, message: 'El nombre es requerido' });
     }
     
-    if (catalogo === 'colonias' && datos.ciudad_id) {
-      campos.push('ciudad_id');
-      valores.push(datos.ciudad_id);
-      placeholders.push('?');
-    }
+    const id = uuidv4();
     
-    if (catalogo === 'tarifas') {
-      if (datos.precio) {
-        campos.push('precio');
-        valores.push(datos.precio);
-        placeholders.push('?');
+    if (catalogo === 'colonias') {
+      if (!ciudad_id) {
+        return res.status(400).json({ success: false, message: 'La ciudad es requerida' });
       }
-      if (datos.velocidad_mbps) {
-        campos.push('velocidad_mbps');
-        valores.push(datos.velocidad_mbps);
-        placeholders.push('?');
-      }
-      campos.push('created_by');
-      valores.push(req.userId);
-      placeholders.push('?');
-    }
-    
-    const [result] = await pool.query(
-      `INSERT INTO ${tabla} (${campos.join(', ')}) VALUES (${placeholders.join(', ')})`,
-      valores
-    );
-    
-    res.status(201).json({
-      success: true,
-      message: 'Item agregado correctamente',
-      data: {
-        id: result.insertId
-      }
-    });
-    
-  } catch (error) {
-    console.error('Error agregando item:', error);
-    
-    if (error.code === 'ER_DUP_ENTRY') {
-      return res.status(400).json({
-        success: false,
-        message: 'Ya existe un item con ese nombre'
-      });
-    }
-    
-    res.status(500).json({
-      success: false,
-      message: 'Error al agregar item'
-    });
-  }
-};
-
-// Actualizar item de catálogo
-const actualizarItem = async (req, res) => {
-  try {
-    const { catalogo, id } = req.params;
-    const datos = req.body;
-    
-    if (req.user.rol_nombre !== 'Administrador') {
-      return res.status(403).json({
-        success: false,
-        message: 'No tienes permiso para modificar catálogos'
-      });
-    }
-    
-    const tabla = CATALOGOS[catalogo];
-    
-    if (!tabla) {
-      return res.status(404).json({
-        success: false,
-        message: 'Catálogo no encontrado'
-      });
-    }
-    
-    const updates = [];
-    const valores = [];
-    
-    if (datos.nombre !== undefined) {
-      updates.push('nombre = ?');
-      valores.push(datos.nombre);
-    }
-    
-    if (datos.descripcion !== undefined) {
-      updates.push('descripcion = ?');
-      valores.push(datos.descripcion);
-    }
-    
-    if (datos.activo !== undefined) {
-      updates.push('activo = ?');
-      valores.push(datos.activo ? 1 : 0);
-    }
-    
-    if (catalogo === 'tarifas') {
-      if (datos.precio !== undefined) {
-        updates.push('precio = ?');
-        valores.push(datos.precio);
-      }
-      if (datos.velocidad_mbps !== undefined) {
-        updates.push('velocidad_mbps = ?');
-        valores.push(datos.velocidad_mbps);
-      }
-      updates.push('updated_by = ?');
-      valores.push(req.userId);
-    }
-    
-    if (updates.length === 0) {
-      return res.json({
-        success: true,
-        message: 'No hay cambios que guardar'
-      });
-    }
-    
-    valores.push(id);
-    
-    await pool.query(
-      `UPDATE ${tabla} SET ${updates.join(', ')} WHERE id = ?`,
-      valores
-    );
-    
-    res.json({
-      success: true,
-      message: 'Item actualizado correctamente'
-    });
-    
-  } catch (error) {
-    console.error('Error actualizando item:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error al actualizar item'
-    });
-  }
-};
-
-// Desactivar item (borrado lógico)
-const desactivarItem = async (req, res) => {
-  try {
-    const { catalogo, id } = req.params;
-    
-    if (req.user.rol_nombre !== 'Administrador') {
-      return res.status(403).json({
-        success: false,
-        message: 'No tienes permiso para modificar catálogos'
-      });
-    }
-    
-    const tabla = CATALOGOS[catalogo];
-    
-    if (!tabla) {
-      return res.status(404).json({
-        success: false,
-        message: 'Catálogo no encontrado'
-      });
-    }
-    
-    await pool.query(
-      `UPDATE ${tabla} SET activo = 0 WHERE id = ?`,
-      [id]
-    );
-    
-    res.json({
-      success: true,
-      message: 'Item desactivado correctamente'
-    });
-    
-  } catch (error) {
-    console.error('Error desactivando item:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error al desactivar item'
-    });
-  }
-};
-
-// Obtener todas las ciudades con sus colonias
-const ciudadesConColonias = async (req, res) => {
-  try {
-    const [ciudades] = await pool.query(
-      'SELECT * FROM cat_ciudades WHERE activo = 1 ORDER BY nombre'
-    );
-    
-    for (const ciudad of ciudades) {
-      const [colonias] = await pool.query(
-        'SELECT * FROM cat_colonias WHERE ciudad_id = ? AND activo = 1 ORDER BY nombre',
-        [ciudad.id]
+      await pool.query(
+        `INSERT INTO ${tabla} (id, nombre, ciudad_id, activo) VALUES (?, ?, ?, 1)`,
+        [id, nombre, ciudad_id]
       );
-      ciudad.colonias = colonias;
+    } else if (catalogo === 'tarifas') {
+      await pool.query(
+        `INSERT INTO ${tabla} (id, nombre, precio, velocidad_mbps, activo) VALUES (?, ?, ?, ?, 1)`,
+        [id, nombre, precio || 0, velocidad_mbps || 0]
+      );
+    } else {
+      await pool.query(
+        `INSERT INTO ${tabla} (id, nombre, descripcion, activo) VALUES (?, ?, ?, 1)`,
+        [id, nombre, descripcion || null]
+      );
     }
     
-    res.json({
-      success: true,
-      data: ciudades
-    });
-    
+    res.status(201).json({ success: true, message: 'Registro creado', data: { id } });
   } catch (error) {
-    console.error('Error obteniendo ciudades:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error al obtener ciudades'
-    });
+    console.error('Error creando en catálogo:', error);
+    res.status(500).json({ success: false, message: 'Error al crear registro' });
   }
 };
 
-module.exports = {
-  catalogosDisponibles,
-  obtenerCatalogo,
-  agregarItem,
-  actualizarItem,
-  desactivarItem,
-  ciudadesConColonias
-};
+module.exports = { listar, crear };

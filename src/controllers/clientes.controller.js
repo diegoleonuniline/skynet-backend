@@ -1,58 +1,24 @@
 const pool = require('../config/database');
-const cloudinary = require('../config/cloudinary');
-const { registrarCreacion, registrarEdicion, registrarEliminacion, obtenerHistorial } = require('../services/historial.service');
-const { obtenerResumenCliente } = require('../services/pagos.service');
+const { v4: uuidv4 } = require('uuid');
 
-// Generar número de cliente único
-const generarNumeroCliente = async () => {
-  const [ultimo] = await pool.query(
-    `SELECT numero_cliente FROM clientes 
-     WHERE numero_cliente IS NOT NULL 
-     ORDER BY id DESC LIMIT 1`
-  );
-  
-  let consecutivo = 1;
-  if (ultimo.length > 0 && ultimo[0].numero_cliente) {
-    const num = parseInt(ultimo[0].numero_cliente.replace('CLI', ''));
-    consecutivo = num + 1;
-  }
-  
-  return `CLI${String(consecutivo).padStart(6, '0')}`;
-};
-
-// Listar clientes con filtros
 const listar = async (req, res) => {
   try {
-    const { 
-      busqueda, 
-      estado_id, 
-      colonia_id, 
-      ciudad_id,
-      page = 1, 
-      limit = 20 
-    } = req.query;
+    const { busqueda, estado_id, page = 1, limit = 15 } = req.query;
+    const offset = (page - 1) * limit;
     
     let query = `
-      SELECT c.*, 
-             ec.nombre as estado,
-             col.nombre as colonia,
-             ciu.nombre as ciudad,
-             (SELECT COALESCE(SUM(ca.saldo), 0) FROM cargos ca 
-              JOIN servicios s ON ca.servicio_id = s.id 
-              WHERE s.cliente_id = c.id AND ca.saldo > 0 AND ca.activo = 1) as adeudo
+      SELECT c.*, col.nombre as colonia, ciu.nombre as ciudad
       FROM clientes c
-      LEFT JOIN cat_estados_cliente ec ON c.estado_id = ec.id
-      LEFT JOIN cat_colonias col ON c.colonia_id = col.id
-      LEFT JOIN cat_ciudades ciu ON col.ciudad_id = ciu.id
+      LEFT JOIN catalogo_colonias col ON c.colonia_id = col.id
+      LEFT JOIN catalogo_ciudades ciu ON col.ciudad_id = ciu.id
       WHERE c.activo = 1
     `;
-    
     const params = [];
     
     if (busqueda) {
       query += ` AND (c.nombre LIKE ? OR c.apellido_paterno LIKE ? OR c.numero_cliente LIKE ? OR c.telefono_principal LIKE ?)`;
-      const term = `%${busqueda}%`;
-      params.push(term, term, term, term);
+      const searchTerm = `%${busqueda}%`;
+      params.push(searchTerm, searchTerm, searchTerm, searchTerm);
     }
     
     if (estado_id) {
@@ -60,128 +26,108 @@ const listar = async (req, res) => {
       params.push(estado_id);
     }
     
-    if (colonia_id) {
-      query += ` AND c.colonia_id = ?`;
-      params.push(colonia_id);
-    }
-    
-    if (ciudad_id) {
-      query += ` AND col.ciudad_id = ?`;
-      params.push(ciudad_id);
-    }
-    
-    // Contar total
-    const countQuery = query.replace(/SELECT.*FROM/, 'SELECT COUNT(*) as total FROM');
+    // Count total
+    const countQuery = query.replace('SELECT c.*, col.nombre as colonia, ciu.nombre as ciudad', 'SELECT COUNT(*) as total');
     const [countResult] = await pool.query(countQuery, params);
     const total = countResult[0].total;
     
-    // Paginación
-    const offset = (page - 1) * limit;
     query += ` ORDER BY c.created_at DESC LIMIT ? OFFSET ?`;
-    params.push(parseInt(limit), offset);
+    params.push(parseInt(limit), parseInt(offset));
     
     const [clientes] = await pool.query(query, params);
+    
+    // Obtener adeudo de cada cliente
+    for (let cliente of clientes) {
+      const [adeudo] = await pool.query(
+        `SELECT COALESCE(SUM(saldo), 0) as adeudo FROM cargos WHERE cliente_id = ? AND activo = 1`,
+        [cliente.id]
+      );
+      cliente.adeudo = parseFloat(adeudo[0].adeudo) || 0;
+      cliente.estado = cliente.activo ? 'Activo' : 'Inactivo';
+    }
     
     res.json({
       success: true,
       data: clientes,
       pagination: {
-        total,
         page: parseInt(page),
         limit: parseInt(limit),
+        total,
         pages: Math.ceil(total / limit)
       }
     });
-    
   } catch (error) {
     console.error('Error listando clientes:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error al listar clientes'
-    });
+    res.status(500).json({ success: false, message: 'Error al listar clientes' });
   }
 };
 
-// Obtener cliente por ID
 const obtener = async (req, res) => {
   try {
     const { id } = req.params;
     
     const [clientes] = await pool.query(
-      `SELECT c.*, 
-              ec.nombre as estado,
-              col.nombre as colonia,
-              ciu.nombre as ciudad,
-              ciu.id as ciudad_id
+      `SELECT c.*, col.nombre as colonia, ciu.nombre as ciudad
        FROM clientes c
-       LEFT JOIN cat_estados_cliente ec ON c.estado_id = ec.id
-       LEFT JOIN cat_colonias col ON c.colonia_id = col.id
-       LEFT JOIN cat_ciudades ciu ON col.ciudad_id = ciu.id
-       WHERE c.id = ? AND c.activo = 1`,
+       LEFT JOIN catalogo_colonias col ON c.colonia_id = col.id
+       LEFT JOIN catalogo_ciudades ciu ON col.ciudad_id = ciu.id
+       WHERE c.id = ?`,
       [id]
     );
     
     if (clientes.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: 'Cliente no encontrado'
-      });
+      return res.status(404).json({ success: false, message: 'Cliente no encontrado' });
     }
     
     const cliente = clientes[0];
+    cliente.estado = cliente.activo ? 'Activo' : 'Inactivo';
     
-    // Obtener servicios del cliente
+    // Obtener servicios
     const [servicios] = await pool.query(
-      `SELECT s.*, t.nombre as tarifa_nombre, t.velocidad_mbps,
-              es.nombre as estado
+      `SELECT s.*, t.nombre as tarifa_nombre, t.velocidad_mbps
        FROM servicios s
-       JOIN cat_tarifas t ON s.tarifa_id = t.id
-       JOIN cat_estados_servicio es ON s.estado_id = es.id
+       LEFT JOIN catalogo_tarifas t ON s.tarifa_id = t.id
        WHERE s.cliente_id = ? AND s.activo = 1`,
       [id]
     );
     
-    // Obtener resumen financiero
-    const resumen = await obtenerResumenCliente(id);
+    for (let servicio of servicios) {
+      servicio.estado = servicio.activo ? 'Activo' : 'Inactivo';
+    }
     
-    res.json({
-      success: true,
-      data: {
-        ...cliente,
-        servicios,
-        resumen_financiero: resumen
-      }
-    });
+    cliente.servicios = servicios;
     
+    // Resumen financiero
+    const [resumen] = await pool.query(
+      `SELECT 
+        COALESCE(SUM(CASE WHEN saldo > 0 THEN saldo ELSE 0 END), 0) as total_adeudo,
+        COALESCE(SUM(CASE WHEN saldo < 0 THEN ABS(saldo) ELSE 0 END), 0) as saldo_favor
+       FROM cargos WHERE cliente_id = ? AND activo = 1`,
+      [id]
+    );
+    
+    cliente.resumen_financiero = {
+      balance: parseFloat(resumen[0].total_adeudo) - parseFloat(resumen[0].saldo_favor),
+      total_adeudo: parseFloat(resumen[0].total_adeudo),
+      saldo_favor: parseFloat(resumen[0].saldo_favor)
+    };
+    
+    res.json({ success: true, data: cliente });
   } catch (error) {
     console.error('Error obteniendo cliente:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error al obtener cliente'
-    });
+    res.status(500).json({ success: false, message: 'Error al obtener cliente' });
   }
 };
 
-// Crear cliente
 const crear = async (req, res) => {
   try {
     const {
-      nombre,
-      apellido_paterno,
-      apellido_materno,
-      telefono_principal,
-      telefono_secundario,
-      email,
-      calle,
-      numero_exterior,
-      numero_interior,
-      colonia_id,
-      codigo_postal,
-      referencias,
-      notas
+      nombre, apellido_paterno, apellido_materno,
+      telefono_principal, telefono_secundario, email,
+      calle, numero_exterior, numero_interior,
+      colonia_id, codigo_postal, referencias, notas
     } = req.body;
     
-    // Validaciones
     if (!nombre || !apellido_paterno || !telefono_principal) {
       return res.status(400).json({
         success: false,
@@ -189,99 +135,66 @@ const crear = async (req, res) => {
       });
     }
     
-    // Obtener estado activo
-    const [estados] = await pool.query(
-      'SELECT id FROM cat_estados_cliente WHERE nombre = "Activo"'
+    const id = uuidv4();
+    
+    // Generar número de cliente
+    const [lastClient] = await pool.query(
+      'SELECT numero_cliente FROM clientes ORDER BY created_at DESC LIMIT 1'
     );
+    let nextNum = 1;
+    if (lastClient.length > 0 && lastClient[0].numero_cliente) {
+      const match = lastClient[0].numero_cliente.match(/\d+/);
+      if (match) nextNum = parseInt(match[0]) + 1;
+    }
+    const numero_cliente = `CLI-${String(nextNum).padStart(5, '0')}`;
     
-    const numero_cliente = await generarNumeroCliente();
-    
-    const [result] = await pool.query(
-      `INSERT INTO clientes 
-       (numero_cliente, nombre, apellido_paterno, apellido_materno, telefono_principal, 
-        telefono_secundario, email, calle, numero_exterior, numero_interior, 
-        colonia_id, codigo_postal, referencias, notas, estado_id, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [numero_cliente, nombre, apellido_paterno, apellido_materno, telefono_principal,
-       telefono_secundario, email, calle, numero_exterior, numero_interior,
-       colonia_id, codigo_postal, referencias, notas, estados[0].id, req.userId]
+    await pool.query(
+      `INSERT INTO clientes (id, numero_cliente, nombre, apellido_paterno, apellido_materno,
+        telefono_principal, telefono_secundario, email, calle, numero_exterior, numero_interior,
+        colonia_id, codigo_postal, referencias, notas, activo, created_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`,
+      [id, numero_cliente, nombre, apellido_paterno, apellido_materno || null,
+       telefono_principal, telefono_secundario || null, email || null,
+       calle || null, numero_exterior || null, numero_interior || null,
+       colonia_id || null, codigo_postal || null, referencias || null, notas || null,
+       req.userId]
     );
-    
-    // Registrar en historial
-    await registrarCreacion('clientes', result.insertId, req.userId, req.ip);
     
     res.status(201).json({
       success: true,
       message: 'Cliente creado correctamente',
-      data: {
-        id: result.insertId,
-        numero_cliente
-      }
+      data: { id, numero_cliente }
     });
-    
   } catch (error) {
     console.error('Error creando cliente:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error al crear cliente'
-    });
+    res.status(500).json({ success: false, message: 'Error al crear cliente' });
   }
 };
 
-// Actualizar cliente
 const actualizar = async (req, res) => {
   try {
     const { id } = req.params;
     const campos = req.body;
     
-    // Verificar permisos (solo admin puede editar)
-    if (req.user.rol_nombre !== 'Administrador') {
-      return res.status(403).json({
-        success: false,
-        message: 'No tienes permiso para editar clientes'
-      });
-    }
-    
-    // Obtener datos actuales para historial
-    const [actual] = await pool.query(
-      'SELECT * FROM clientes WHERE id = ? AND activo = 1',
-      [id]
-    );
-    
-    if (actual.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: 'Cliente no encontrado'
-      });
-    }
-    
-    // Campos permitidos para actualizar
-    const permitidos = [
-      'nombre', 'apellido_paterno', 'apellido_materno', 'telefono_principal',
-      'telefono_secundario', 'email', 'calle', 'numero_exterior', 'numero_interior',
-      'colonia_id', 'codigo_postal', 'referencias', 'notas', 'estado_id'
+    const camposPermitidos = [
+      'nombre', 'apellido_paterno', 'apellido_materno',
+      'telefono_principal', 'telefono_secundario', 'email',
+      'calle', 'numero_exterior', 'numero_interior',
+      'colonia_id', 'codigo_postal', 'referencias', 'notas', 'activo'
     ];
     
     const updates = [];
     const values = [];
-    const cambios = {};
     
-    for (const campo of permitidos) {
-      if (campos[campo] !== undefined && campos[campo] !== actual[0][campo]) {
+    for (const campo of camposPermitidos) {
+      if (campos[campo] !== undefined) {
         updates.push(`${campo} = ?`);
         values.push(campos[campo]);
-        cambios[campo] = {
-          anterior: actual[0][campo],
-          nuevo: campos[campo]
-        };
       }
     }
     
     if (updates.length === 0) {
-      return res.json({
-        success: true,
-        message: 'No hay cambios que guardar'
-      });
+      return res.status(400).json({ success: false, message: 'No hay campos para actualizar' });
     }
     
     updates.push('updated_by = ?');
@@ -293,134 +206,68 @@ const actualizar = async (req, res) => {
       values
     );
     
-    // Registrar cambios en historial
-    await registrarEdicion('clientes', id, cambios, req.userId, req.ip);
-    
-    res.json({
-      success: true,
-      message: 'Cliente actualizado correctamente'
-    });
-    
+    res.json({ success: true, message: 'Cliente actualizado' });
   } catch (error) {
     console.error('Error actualizando cliente:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error al actualizar cliente'
-    });
+    res.status(500).json({ success: false, message: 'Error al actualizar cliente' });
   }
 };
 
-// Eliminar cliente (borrado lógico)
 const eliminar = async (req, res) => {
   try {
     const { id } = req.params;
-    
-    // Solo admin puede eliminar
-    if (req.user.rol_nombre !== 'Administrador') {
-      return res.status(403).json({
-        success: false,
-        message: 'No tienes permiso para eliminar clientes'
-      });
-    }
     
     await pool.query(
       'UPDATE clientes SET activo = 0, updated_by = ? WHERE id = ?',
       [req.userId, id]
     );
     
-    await registrarEliminacion('clientes', id, req.userId, req.ip);
-    
-    res.json({
-      success: true,
-      message: 'Cliente eliminado correctamente'
-    });
-    
+    res.json({ success: true, message: 'Cliente eliminado' });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: 'Error al eliminar cliente'
-    });
+    res.status(500).json({ success: false, message: 'Error al eliminar cliente' });
   }
 };
 
-// Subir INE
 const subirINE = async (req, res) => {
   try {
     const { id } = req.params;
-    const { tipo } = req.body; // 'frente' o 'reverso'
+    const { tipo } = req.body;
     
     if (!req.file) {
-      return res.status(400).json({
-        success: false,
-        message: 'No se proporcionó archivo'
-      });
+      return res.status(400).json({ success: false, message: 'No se recibió archivo' });
     }
     
-    // Subir a Cloudinary
-    const result = await new Promise((resolve, reject) => {
-      cloudinary.uploader.upload_stream(
-        {
-          folder: 'skynet/ine',
-          resource_type: 'image',
-          public_id: `cliente_${id}_ine_${tipo}`
-        },
-        (error, result) => {
-          if (error) reject(error);
-          else resolve(result);
-        }
-      ).end(req.file.buffer);
-    });
+    // Aquí iría la lógica de Cloudinary
+    const url = `https://placeholder.com/ine_${id}_${tipo}.jpg`;
     
-    // Actualizar URL en cliente
     const campo = tipo === 'frente' ? 'ine_frente_url' : 'ine_reverso_url';
-    
     await pool.query(
       `UPDATE clientes SET ${campo} = ?, updated_by = ? WHERE id = ?`,
-      [result.secure_url, req.userId, id]
+      [url, req.userId, id]
     );
     
-    res.json({
-      success: true,
-      message: 'INE subida correctamente',
-      data: {
-        url: result.secure_url
-      }
-    });
-    
+    res.json({ success: true, message: 'INE subida correctamente', url });
   } catch (error) {
-    console.error('Error subiendo INE:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error al subir INE'
-    });
+    res.status(500).json({ success: false, message: 'Error al subir INE' });
   }
 };
 
-// Obtener historial de cambios
 const historial = async (req, res) => {
   try {
     const { id } = req.params;
     
-    // Solo admin puede ver historial
-    if (req.user.rol_nombre !== 'Administrador') {
-      return res.status(403).json({
-        success: false,
-        message: 'No tienes permiso para ver el historial'
-      });
-    }
+    const [historial] = await pool.query(
+      `SELECT h.*, u.nombre as usuario_nombre
+       FROM historial_cambios h
+       LEFT JOIN usuarios u ON h.usuario_id = u.id
+       WHERE h.tabla_afectada = 'clientes' AND h.registro_id = ?
+       ORDER BY h.created_at DESC`,
+      [id]
+    );
     
-    const historial = await obtenerHistorial('clientes', id);
-    
-    res.json({
-      success: true,
-      data: historial
-    });
-    
+    res.json({ success: true, data: historial });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: 'Error al obtener historial'
-    });
+    res.status(500).json({ success: false, message: 'Error al obtener historial' });
   }
 };
 

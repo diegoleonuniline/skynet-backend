@@ -1,338 +1,137 @@
-const bcrypt = require('bcryptjs');
 const pool = require('../config/database');
-const { registrarCreacion, registrarEdicion, registrarEliminacion } = require('../services/historial.service');
+const bcrypt = require('bcryptjs');
+const { v4: uuidv4 } = require('uuid');
 
-// Listar usuarios
 const listar = async (req, res) => {
   try {
-    const { rol_id, estado_id, busqueda, page = 1, limit = 20 } = req.query;
-    
-    let query = `
-      SELECT u.id, u.username, u.nombre_completo, u.email, u.telefono,
-             u.ultimo_acceso, u.activo, u.created_at,
-             r.nombre as rol,
-             e.nombre as estado
-      FROM usuarios u
-      JOIN cat_roles r ON u.rol_id = r.id
-      JOIN cat_estados_usuario e ON u.estado_id = e.id
-      WHERE u.activo = 1
-    `;
-    
-    const params = [];
-    
-    if (rol_id) {
-      query += ` AND u.rol_id = ?`;
-      params.push(rol_id);
-    }
-    
-    if (estado_id) {
-      query += ` AND u.estado_id = ?`;
-      params.push(estado_id);
-    }
-    
-    if (busqueda) {
-      query += ` AND (u.nombre_completo LIKE ? OR u.username LIKE ? OR u.email LIKE ?)`;
-      const term = `%${busqueda}%`;
-      params.push(term, term, term);
-    }
-    
-    const offset = (page - 1) * limit;
-    query += ` ORDER BY u.created_at DESC LIMIT ? OFFSET ?`;
-    params.push(parseInt(limit), offset);
-    
-    const [usuarios] = await pool.query(query, params);
+    const [usuarios] = await pool.query(
+      `SELECT u.id, u.nombre, u.email, u.activo, u.created_at,
+              r.nombre as rol_nombre
+       FROM usuarios u
+       LEFT JOIN usuarios_roles ur ON u.id = ur.usuario_id
+       LEFT JOIN catalogo_roles r ON ur.rol_id = r.id
+       WHERE u.activo = 1
+       ORDER BY u.created_at DESC`
+    );
     
     res.json({
       success: true,
-      data: usuarios
+      data: usuarios.map(u => ({
+        ...u,
+        username: u.email,
+        nombre_completo: u.nombre,
+        estado_nombre: u.activo ? 'Activo' : 'Inactivo'
+      }))
     });
-    
   } catch (error) {
     console.error('Error listando usuarios:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error al listar usuarios'
-    });
+    res.status(500).json({ success: false, message: 'Error al listar usuarios' });
   }
 };
 
-// Obtener usuario por ID
-const obtener = async (req, res) => {
-  try {
-    const { id } = req.params;
-    
-    const [usuarios] = await pool.query(
-      `SELECT u.id, u.username, u.nombre_completo, u.email, u.telefono,
-              u.rol_id, u.estado_id, u.ultimo_acceso, u.activo, u.created_at,
-              r.nombre as rol,
-              e.nombre as estado
-       FROM usuarios u
-       JOIN cat_roles r ON u.rol_id = r.id
-       JOIN cat_estados_usuario e ON u.estado_id = e.id
-       WHERE u.id = ? AND u.activo = 1`,
-      [id]
-    );
-    
-    if (usuarios.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: 'Usuario no encontrado'
-      });
-    }
-    
-    res.json({
-      success: true,
-      data: usuarios[0]
-    });
-    
-  } catch (error) {
-    console.error('Error obteniendo usuario:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error al obtener usuario'
-    });
-  }
-};
-
-// Crear usuario
 const crear = async (req, res) => {
+  const connection = await pool.getConnection();
+  
   try {
-    const {
-      username,
-      password,
-      nombre_completo,
-      email,
-      telefono,
-      rol_id
-    } = req.body;
+    await connection.beginTransaction();
     
-    if (!username || !password || !nombre_completo || !rol_id) {
-      return res.status(400).json({
-        success: false,
-        message: 'Username, password, nombre y rol son requeridos'
-      });
+    const { nombre_completo, email, password, rol_id } = req.body;
+    
+    if (!nombre_completo || !email || !password) {
+      return res.status(400).json({ success: false, message: 'Nombre, email y contraseña son requeridos' });
     }
     
-    if (password.length < 6) {
-      return res.status(400).json({
-        success: false,
-        message: 'La contraseña debe tener al menos 6 caracteres'
-      });
+    // Verificar email único
+    const [existe] = await connection.query('SELECT id FROM usuarios WHERE email = ?', [email]);
+    if (existe.length > 0) {
+      return res.status(400).json({ success: false, message: 'El email ya está registrado' });
     }
     
-    // Verificar username único
-    const [existente] = await pool.query(
-      'SELECT id FROM usuarios WHERE username = ?',
-      [username]
+    const userId = uuidv4();
+    const hash = await bcrypt.hash(password, 10);
+    
+    await connection.query(
+      `INSERT INTO usuarios (id, nombre, email, password, activo, created_by)
+       VALUES (?, ?, ?, ?, 1, ?)`,
+      [userId, nombre_completo, email, hash, req.userId]
     );
     
-    if (existente.length > 0) {
-      return res.status(400).json({
-        success: false,
-        message: 'El nombre de usuario ya existe'
-      });
+    // Asignar rol
+    if (rol_id) {
+      await connection.query(
+        `INSERT INTO usuarios_roles (id, usuario_id, rol_id) VALUES (?, ?, ?)`,
+        [uuidv4(), userId, rol_id]
+      );
     }
     
-    // Obtener estado activo
-    const [estados] = await pool.query(
-      'SELECT id FROM cat_estados_usuario WHERE nombre = "Activo"'
-    );
+    await connection.commit();
     
-    const passwordHash = await bcrypt.hash(password, 10);
-    
-    const [result] = await pool.query(
-      `INSERT INTO usuarios 
-       (username, password_hash, nombre_completo, email, telefono, rol_id, estado_id, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [username, passwordHash, nombre_completo, email, telefono, rol_id, estados[0].id, req.userId]
-    );
-    
-    await registrarCreacion('usuarios', result.insertId, req.userId, req.ip);
-    
-    res.status(201).json({
-      success: true,
-      message: 'Usuario creado correctamente',
-      data: {
-        id: result.insertId
-      }
-    });
-    
+    res.status(201).json({ success: true, message: 'Usuario creado', data: { id: userId } });
   } catch (error) {
+    await connection.rollback();
     console.error('Error creando usuario:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error al crear usuario'
-    });
+    res.status(500).json({ success: false, message: 'Error al crear usuario' });
+  } finally {
+    connection.release();
   }
 };
 
-// Actualizar usuario
 const actualizar = async (req, res) => {
   try {
     const { id } = req.params;
-    const campos = req.body;
+    const { nombre_completo, email, rol_id, activo } = req.body;
     
-    const [actual] = await pool.query(
-      'SELECT * FROM usuarios WHERE id = ? AND activo = 1',
-      [id]
-    );
-    
-    if (actual.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: 'Usuario no encontrado'
-      });
-    }
-    
-    const permitidos = ['nombre_completo', 'email', 'telefono', 'rol_id', 'estado_id'];
     const updates = [];
     const values = [];
-    const cambios = {};
     
-    for (const campo of permitidos) {
-      if (campos[campo] !== undefined && campos[campo] !== actual[0][campo]) {
-        updates.push(`${campo} = ?`);
-        values.push(campos[campo]);
-        cambios[campo] = {
-          anterior: actual[0][campo],
-          nuevo: campos[campo]
-        };
-      }
+    if (nombre_completo) { updates.push('nombre = ?'); values.push(nombre_completo); }
+    if (email) { updates.push('email = ?'); values.push(email); }
+    if (activo !== undefined) { updates.push('activo = ?'); values.push(activo); }
+    
+    if (updates.length > 0) {
+      updates.push('updated_by = ?');
+      values.push(req.userId);
+      values.push(id);
+      
+      await pool.query(`UPDATE usuarios SET ${updates.join(', ')} WHERE id = ?`, values);
     }
     
-    if (updates.length === 0) {
-      return res.json({
-        success: true,
-        message: 'No hay cambios que guardar'
-      });
+    // Actualizar rol si se proporciona
+    if (rol_id) {
+      await pool.query('DELETE FROM usuarios_roles WHERE usuario_id = ?', [id]);
+      await pool.query(
+        'INSERT INTO usuarios_roles (id, usuario_id, rol_id) VALUES (?, ?, ?)',
+        [uuidv4(), id, rol_id]
+      );
     }
     
-    updates.push('updated_by = ?');
-    values.push(req.userId);
-    values.push(id);
-    
-    await pool.query(
-      `UPDATE usuarios SET ${updates.join(', ')} WHERE id = ?`,
-      values
-    );
-    
-    await registrarEdicion('usuarios', id, cambios, req.userId, req.ip);
-    
-    res.json({
-      success: true,
-      message: 'Usuario actualizado correctamente'
-    });
-    
+    res.json({ success: true, message: 'Usuario actualizado' });
   } catch (error) {
     console.error('Error actualizando usuario:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error al actualizar usuario'
-    });
+    res.status(500).json({ success: false, message: 'Error al actualizar usuario' });
   }
 };
 
-// Resetear contraseña
 const resetPassword = async (req, res) => {
   try {
     const { id } = req.params;
-    const { nueva_password } = req.body;
+    const { password_nuevo } = req.body;
     
-    if (!nueva_password || nueva_password.length < 6) {
-      return res.status(400).json({
-        success: false,
-        message: 'La contraseña debe tener al menos 6 caracteres'
-      });
+    if (!password_nuevo || password_nuevo.length < 6) {
+      return res.status(400).json({ success: false, message: 'La contraseña debe tener al menos 6 caracteres' });
     }
     
-    const passwordHash = await bcrypt.hash(nueva_password, 10);
+    const hash = await bcrypt.hash(password_nuevo, 10);
     
     await pool.query(
-      'UPDATE usuarios SET password_hash = ?, updated_by = ? WHERE id = ?',
-      [passwordHash, req.userId, id]
+      'UPDATE usuarios SET password = ?, updated_by = ? WHERE id = ?',
+      [hash, req.userId, id]
     );
     
-    res.json({
-      success: true,
-      message: 'Contraseña actualizada correctamente'
-    });
-    
+    res.json({ success: true, message: 'Contraseña actualizada' });
   } catch (error) {
-    console.error('Error reseteando password:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error al resetear contraseña'
-    });
+    res.status(500).json({ success: false, message: 'Error al actualizar contraseña' });
   }
 };
 
-// Eliminar usuario (borrado lógico)
-const eliminar = async (req, res) => {
-  try {
-    const { id } = req.params;
-    
-    // No permitir eliminarse a sí mismo
-    if (parseInt(id) === req.userId) {
-      return res.status(400).json({
-        success: false,
-        message: 'No puedes eliminarte a ti mismo'
-      });
-    }
-    
-    await pool.query(
-      'UPDATE usuarios SET activo = 0, updated_by = ? WHERE id = ?',
-      [req.userId, id]
-    );
-    
-    await registrarEliminacion('usuarios', id, req.userId, req.ip);
-    
-    res.json({
-      success: true,
-      message: 'Usuario eliminado correctamente'
-    });
-    
-  } catch (error) {
-    console.error('Error eliminando usuario:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error al eliminar usuario'
-    });
-  }
-};
-
-// Obtener técnicos (para asignar instalaciones)
-const tecnicos = async (req, res) => {
-  try {
-    const [tecnicos] = await pool.query(
-      `SELECT u.id, u.nombre_completo, u.telefono
-       FROM usuarios u
-       JOIN cat_roles r ON u.rol_id = r.id
-       JOIN cat_estados_usuario e ON u.estado_id = e.id
-       WHERE (r.nombre = 'Tecnico' OR r.nombre = 'Administrador')
-         AND e.nombre = 'Activo' AND u.activo = 1
-       ORDER BY u.nombre_completo`
-    );
-    
-    res.json({
-      success: true,
-      data: tecnicos
-    });
-    
-  } catch (error) {
-    console.error('Error obteniendo técnicos:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error al obtener técnicos'
-    });
-  }
-};
-
-module.exports = {
-  listar,
-  obtener,
-  crear,
-  actualizar,
-  resetPassword,
-  eliminar,
-  tecnicos
-};
+module.exports = { listar, crear, actualizar, resetPassword };
