@@ -19,7 +19,6 @@ async function obtenerHistorialPagos(req, res) {
   try {
     const { cliente_id } = req.params;
     const pool = obtenerPool();
-
     const [pagos] = await pool.query(
       `SELECT p.*, 
               CASE p.metodo_pago
@@ -34,11 +33,42 @@ async function obtenerHistorialPagos(req, res) {
        ORDER BY p.fecha_pago DESC`,
       [cliente_id]
     );
-
     res.json({ ok: true, pagos });
   } catch (err) {
     console.error('❌ Error:', err.message);
     res.status(500).json({ ok: false, mensaje: 'Error al obtener historial' });
+  }
+}
+
+// OBTENER PAGOS DE UN CLIENTE
+async function obtenerPagosCliente(req, res) {
+  try {
+    const { cliente_id } = req.params;
+    const pool = obtenerPool();
+    const [pagos] = await pool.query(
+      `SELECT * FROM pagos WHERE cliente_id = ? ORDER BY fecha_pago DESC`,
+      [cliente_id]
+    );
+    res.json({ ok: true, pagos });
+  } catch (err) {
+    console.error('❌ Error:', err.message);
+    res.status(500).json({ ok: false, mensaje: 'Error al obtener pagos' });
+  }
+}
+
+// OBTENER MENSUALIDADES DE UN CLIENTE
+async function obtenerMensualidadesCliente(req, res) {
+  try {
+    const { cliente_id } = req.params;
+    const pool = obtenerPool();
+    const [mensualidades] = await pool.query(
+      `SELECT * FROM mensualidades WHERE cliente_id = ? ORDER BY fecha_vencimiento DESC`,
+      [cliente_id]
+    );
+    res.json({ ok: true, mensualidades });
+  } catch (err) {
+    console.error('❌ Error:', err.message);
+    res.status(500).json({ ok: false, mensaje: 'Error al obtener mensualidades' });
   }
 }
 
@@ -56,6 +86,7 @@ async function registrarPago(req, res) {
     } = req.body;
 
     if (!cliente_id || !monto || monto <= 0) {
+      connection.release();
       return res.status(400).json({ ok: false, mensaje: 'Cliente y monto válido requeridos' });
     }
 
@@ -63,8 +94,7 @@ async function registrarPago(req, res) {
     let cargosAplicados = 0;
     let detalleAplicacion = [];
 
-    // 1. Obtener cargos pendientes ordenados por fecha (FIFO)
-    // Primero mensualidades
+    // 1. Obtener mensualidades pendientes
     const [mensualidades] = await connection.query(
       `SELECT id, 'mensualidad' as tipo, concepto, monto, COALESCE(monto_pagado, 0) as monto_pagado,
               (monto - COALESCE(monto_pagado, 0)) as pendiente
@@ -74,7 +104,7 @@ async function registrarPago(req, res) {
       [cliente_id]
     );
 
-    // Luego instalaciones
+    // 2. Obtener instalaciones pendientes
     const [instalaciones] = await connection.query(
       `SELECT id, 'instalacion' as tipo, 'Instalación' as concepto, monto, COALESCE(monto_pagado, 0) as monto_pagado,
               (monto - COALESCE(monto_pagado, 0)) as pendiente
@@ -84,10 +114,9 @@ async function registrarPago(req, res) {
       [cliente_id]
     );
 
-    // Combinar y ordenar todos los cargos
     const cargosPendientes = [...mensualidades, ...instalaciones];
 
-    // 2. Aplicar pago a cada cargo
+    // 3. Aplicar pago a cada cargo
     for (const cargo of cargosPendientes) {
       if (montoRestante <= 0) break;
 
@@ -110,12 +139,12 @@ async function registrarPago(req, res) {
         );
       }
 
-      detalleAplicacion.push(`${cargo.concepto}: ${aplicar.toFixed(2)}`);
+      detalleAplicacion.push(`${cargo.concepto}: $${aplicar.toFixed(2)}`);
       montoRestante -= aplicar;
       cargosAplicados++;
     }
 
-    // 3. Si sobra dinero, agregar a saldo a favor
+    // 4. Si sobra dinero, agregar a saldo a favor
     let nuevoSaldoFavor = 0;
     if (montoRestante > 0) {
       const [cliente] = await connection.query(
@@ -130,10 +159,10 @@ async function registrarPago(req, res) {
         [nuevoSaldoFavor, cliente_id]
       );
       
-      detalleAplicacion.push(`Saldo a favor: ${montoRestante.toFixed(2)}`);
+      detalleAplicacion.push(`Saldo a favor: $${montoRestante.toFixed(2)}`);
     }
 
-    // 4. Insertar registro del pago
+    // 5. Insertar registro del pago
     const [result] = await connection.query(
       `INSERT INTO pagos (
         cliente_id, monto, metodo_pago, referencia, banco,
@@ -191,11 +220,9 @@ async function obtenerAdeudo(req, res) {
     );
 
     let totalAdeudo = 0;
-    
     mensualidades.forEach(m => {
       totalAdeudo += parseFloat(m.monto) - parseFloat(m.monto_pagado || 0);
     });
-
     if (instalacion.length) {
       totalAdeudo += parseFloat(instalacion[0].monto) - parseFloat(instalacion[0].monto_pagado || 0);
     }
@@ -217,6 +244,8 @@ async function obtenerAdeudo(req, res) {
 module.exports = {
   obtenerMetodosPago,
   obtenerHistorialPagos,
+  obtenerPagosCliente,
+  obtenerMensualidadesCliente,
   registrarPago,
   obtenerAdeudo
 };
