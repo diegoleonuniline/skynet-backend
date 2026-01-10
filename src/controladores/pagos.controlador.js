@@ -1,6 +1,6 @@
 const { obtenerPool } = require('../configuracion/base_datos');
 
-// MÉTODOS DE PAGO (hardcoded)
+// MÉTODOS DE PAGO
 async function obtenerMetodosPago(req, res) {
   res.json({ 
     ok: true, 
@@ -8,6 +8,7 @@ async function obtenerMetodosPago(req, res) {
       { id: 'efectivo', nombre: 'Efectivo' },
       { id: 'transferencia', nombre: 'Transferencia' },
       { id: 'tarjeta', nombre: 'Tarjeta' },
+      { id: 'deposito', nombre: 'Depósito' },
       { id: 'otro', nombre: 'Otro' }
     ]
   });
@@ -21,10 +22,14 @@ async function obtenerHistorialPagos(req, res) {
 
     const [pagos] = await pool.query(
       `SELECT p.*, 
-              m.concepto as mensualidad_concepto,
-              m.periodo as mensualidad_periodo
+              CASE p.metodo_pago
+                WHEN 'efectivo' THEN 'Efectivo'
+                WHEN 'transferencia' THEN 'Transferencia'
+                WHEN 'tarjeta' THEN 'Tarjeta'
+                WHEN 'deposito' THEN 'Depósito'
+                ELSE 'Otro'
+              END as metodo_nombre
        FROM pagos p
-       LEFT JOIN mensualidades m ON m.id = p.mensualidad_id
        WHERE p.cliente_id = ? 
        ORDER BY p.fecha_pago DESC`,
       [cliente_id]
@@ -37,43 +42,7 @@ async function obtenerHistorialPagos(req, res) {
   }
 }
 
-// OBTENER PAGOS DE UN CLIENTE
-async function obtenerPagosCliente(req, res) {
-  try {
-    const { cliente_id } = req.params;
-    const pool = obtenerPool();
-
-    const [pagos] = await pool.query(
-      `SELECT * FROM pagos WHERE cliente_id = ? ORDER BY fecha_pago DESC`,
-      [cliente_id]
-    );
-
-    res.json({ ok: true, pagos });
-  } catch (err) {
-    console.error('❌ Error:', err.message);
-    res.status(500).json({ ok: false, mensaje: 'Error al obtener pagos' });
-  }
-}
-
-// OBTENER MENSUALIDADES DE UN CLIENTE
-async function obtenerMensualidadesCliente(req, res) {
-  try {
-    const { cliente_id } = req.params;
-    const pool = obtenerPool();
-
-    const [mensualidades] = await pool.query(
-      `SELECT * FROM mensualidades WHERE cliente_id = ? ORDER BY fecha_vencimiento DESC`,
-      [cliente_id]
-    );
-
-    res.json({ ok: true, mensualidades });
-  } catch (err) {
-    console.error('❌ Error:', err.message);
-    res.status(500).json({ ok: false, mensaje: 'Error al obtener mensualidades' });
-  }
-}
-
-// REGISTRAR PAGO
+// REGISTRAR PAGO - APLICA AUTOMÁTICAMENTE A CARGOS PENDIENTES
 async function registrarPago(req, res) {
   const pool = obtenerPool();
   const connection = await pool.getConnection();
@@ -82,73 +51,119 @@ async function registrarPago(req, res) {
     await connection.beginTransaction();
 
     const {
-      cliente_id, monto, metodo_pago, referencia, notas,
-      mensualidad_id, instalacion_id,
-      numero_recibo, tipo_banco, banco, quien_paga, telefono_quien_paga, comprobante_url, observaciones
+      cliente_id, monto, metodo_pago_id, referencia,
+      banco, quien_paga, telefono_quien_paga, comprobante_url, observaciones
     } = req.body;
 
-    if (!cliente_id || !monto) {
-      return res.status(400).json({ ok: false, mensaje: 'Cliente y monto requeridos' });
+    if (!cliente_id || !monto || monto <= 0) {
+      return res.status(400).json({ ok: false, mensaje: 'Cliente y monto válido requeridos' });
     }
 
-    // Determinar tipo de pago
-    let tipo = 'otro';
-    if (mensualidad_id) tipo = 'mensualidad';
-    else if (instalacion_id) tipo = 'instalacion';
+    let montoRestante = parseFloat(monto);
+    let cargosAplicados = 0;
+    let detalleAplicacion = [];
 
-    // Insertar pago
-    await connection.query(
+    // 1. Obtener cargos pendientes ordenados por fecha (FIFO)
+    // Primero mensualidades
+    const [mensualidades] = await connection.query(
+      `SELECT id, 'mensualidad' as tipo, concepto, monto, COALESCE(monto_pagado, 0) as monto_pagado,
+              (monto - COALESCE(monto_pagado, 0)) as pendiente
+       FROM mensualidades 
+       WHERE cliente_id = ? AND estado IN ('pendiente', 'parcial', 'vencido')
+       ORDER BY fecha_vencimiento ASC`,
+      [cliente_id]
+    );
+
+    // Luego instalaciones
+    const [instalaciones] = await connection.query(
+      `SELECT id, 'instalacion' as tipo, 'Instalación' as concepto, monto, COALESCE(monto_pagado, 0) as monto_pagado,
+              (monto - COALESCE(monto_pagado, 0)) as pendiente
+       FROM instalaciones 
+       WHERE cliente_id = ? AND estado IN ('pendiente', 'parcial')
+       ORDER BY fecha_instalacion ASC`,
+      [cliente_id]
+    );
+
+    // Combinar y ordenar todos los cargos
+    const cargosPendientes = [...mensualidades, ...instalaciones];
+
+    // 2. Aplicar pago a cada cargo
+    for (const cargo of cargosPendientes) {
+      if (montoRestante <= 0) break;
+
+      const pendienteCargo = parseFloat(cargo.pendiente);
+      if (pendienteCargo <= 0) continue;
+
+      const aplicar = Math.min(montoRestante, pendienteCargo);
+      const nuevoMontoPagado = parseFloat(cargo.monto_pagado) + aplicar;
+      const nuevoEstado = nuevoMontoPagado >= parseFloat(cargo.monto) ? 'pagado' : 'parcial';
+
+      if (cargo.tipo === 'mensualidad') {
+        await connection.query(
+          `UPDATE mensualidades SET monto_pagado = ?, estado = ? WHERE id = ?`,
+          [nuevoMontoPagado, nuevoEstado, cargo.id]
+        );
+      } else {
+        await connection.query(
+          `UPDATE instalaciones SET monto_pagado = ?, estado = ? WHERE id = ?`,
+          [nuevoMontoPagado, nuevoEstado, cargo.id]
+        );
+      }
+
+      detalleAplicacion.push(`${cargo.concepto}: ${aplicar.toFixed(2)}`);
+      montoRestante -= aplicar;
+      cargosAplicados++;
+    }
+
+    // 3. Si sobra dinero, agregar a saldo a favor
+    let nuevoSaldoFavor = 0;
+    if (montoRestante > 0) {
+      const [cliente] = await connection.query(
+        `SELECT saldo_favor FROM clientes WHERE id = ?`,
+        [cliente_id]
+      );
+      const saldoActual = parseFloat(cliente[0]?.saldo_favor || 0);
+      nuevoSaldoFavor = saldoActual + montoRestante;
+
+      await connection.query(
+        `UPDATE clientes SET saldo_favor = ? WHERE id = ?`,
+        [nuevoSaldoFavor, cliente_id]
+      );
+      
+      detalleAplicacion.push(`Saldo a favor: ${montoRestante.toFixed(2)}`);
+    }
+
+    // 4. Insertar registro del pago
+    const [result] = await connection.query(
       `INSERT INTO pagos (
-        cliente_id, tipo, monto, metodo_pago, referencia, notas,
-        mensualidad_id, instalacion_id,
-        numero_recibo, tipo_banco, banco, quien_paga, telefono_quien_paga, comprobante_url, observaciones
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        cliente_id, monto, metodo_pago, referencia, banco,
+        quien_paga, telefono_quien_paga, comprobante_url, observaciones,
+        aplicado_a, cargos_aplicados
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
-        cliente_id, tipo, monto, metodo_pago || 'efectivo', referencia || null, notas || null,
-        mensualidad_id || null, instalacion_id || null,
-        numero_recibo || null, tipo_banco || null, banco || null, 
-        quien_paga || null, telefono_quien_paga || null, comprobante_url || null, observaciones || null
+        cliente_id, monto, metodo_pago_id || 'efectivo', referencia || null, banco || null,
+        quien_paga || null, telefono_quien_paga || null, comprobante_url || null, observaciones || null,
+        detalleAplicacion.join(' | '), cargosAplicados
       ]
     );
 
-    // Obtener ID del pago
-    const [newPago] = await connection.query('SELECT id FROM pagos WHERE cliente_id = ? ORDER BY creado_en DESC LIMIT 1', [cliente_id]);
-    const pagoId = newPago[0].id;
-
-    // Actualizar mensualidad si aplica
-    if (mensualidad_id) {
-      const [mens] = await connection.query('SELECT * FROM mensualidades WHERE id = ?', [mensualidad_id]);
-      if (mens.length) {
-        const nuevoMontoPagado = parseFloat(mens[0].monto_pagado || 0) + parseFloat(monto);
-        const nuevoEstado = nuevoMontoPagado >= parseFloat(mens[0].monto) ? 'pagado' : 'parcial';
-        
-        await connection.query(
-          'UPDATE mensualidades SET monto_pagado = ?, estado = ? WHERE id = ?',
-          [nuevoMontoPagado, nuevoEstado, mensualidad_id]
-        );
-      }
-    }
-
-    // Actualizar instalación si aplica
-    if (instalacion_id) {
-      const [inst] = await connection.query('SELECT * FROM instalaciones WHERE id = ?', [instalacion_id]);
-      if (inst.length) {
-        const nuevoMontoPagado = parseFloat(inst[0].monto_pagado || 0) + parseFloat(monto);
-        const nuevoEstado = nuevoMontoPagado >= parseFloat(inst[0].monto) ? 'pagado' : 'parcial';
-        
-        await connection.query(
-          'UPDATE instalaciones SET monto_pagado = ?, estado = ? WHERE id = ?',
-          [nuevoMontoPagado, nuevoEstado, instalacion_id]
-        );
-      }
-    }
-
     await connection.commit();
 
-    res.json({ ok: true, mensaje: 'Pago registrado', pago: { id: pagoId } });
+    res.json({ 
+      ok: true, 
+      mensaje: 'Pago registrado y aplicado',
+      pago: {
+        id: result.insertId,
+        monto: parseFloat(monto),
+        cargos_aplicados: cargosAplicados,
+        nuevo_saldo_favor: nuevoSaldoFavor,
+        detalle: detalleAplicacion
+      }
+    });
+
   } catch (err) {
     await connection.rollback();
-    console.error('❌ Error:', err.message);
+    console.error('❌ Error registrarPago:', err.message);
     res.status(500).json({ ok: false, mensaje: 'Error al registrar pago' });
   } finally {
     connection.release();
@@ -202,8 +217,6 @@ async function obtenerAdeudo(req, res) {
 module.exports = {
   obtenerMetodosPago,
   obtenerHistorialPagos,
-  obtenerPagosCliente,
-  obtenerMensualidadesCliente,
   registrarPago,
   obtenerAdeudo
 };
