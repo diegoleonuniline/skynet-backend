@@ -12,6 +12,8 @@ app.use('/api/catalogos', require('./rutas/catalogos.rutas'));
 app.use('/api/clientes', require('./rutas/clientes.rutas'));
 app.use('/api/dashboard', require('./rutas/dashboard.rutas'));
 app.use('/api/pagos', require('./rutas/pagos.rutas'));
+app.use('/api/equipos', require('./rutas/equipos.rutas'));
+app.use('/api/cargos', require('./rutas/cargos.rutas'));
 
 app.get('/', (req, res) => {
   res.json({ ok: true, mensaje: 'API Skynet funcionando' });

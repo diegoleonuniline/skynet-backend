@@ -1,5 +1,42 @@
 const { obtenerPool } = require('../configuracion/base_datos');
 
+// MÉTODOS DE PAGO (hardcoded)
+async function obtenerMetodosPago(req, res) {
+  res.json({ 
+    ok: true, 
+    metodos: [
+      { id: 'efectivo', nombre: 'Efectivo' },
+      { id: 'transferencia', nombre: 'Transferencia' },
+      { id: 'tarjeta', nombre: 'Tarjeta' },
+      { id: 'otro', nombre: 'Otro' }
+    ]
+  });
+}
+
+// HISTORIAL DE PAGOS
+async function obtenerHistorialPagos(req, res) {
+  try {
+    const { cliente_id } = req.params;
+    const pool = obtenerPool();
+
+    const [pagos] = await pool.query(
+      `SELECT p.*, 
+              m.concepto as mensualidad_concepto,
+              m.periodo as mensualidad_periodo
+       FROM pagos p
+       LEFT JOIN mensualidades m ON m.id = p.mensualidad_id
+       WHERE p.cliente_id = ? 
+       ORDER BY p.fecha_pago DESC`,
+      [cliente_id]
+    );
+
+    res.json({ ok: true, pagos });
+  } catch (err) {
+    console.error('❌ Error:', err.message);
+    res.status(500).json({ ok: false, mensaje: 'Error al obtener historial' });
+  }
+}
+
 // OBTENER PAGOS DE UN CLIENTE
 async function obtenerPagosCliente(req, res) {
   try {
@@ -163,6 +200,8 @@ async function obtenerAdeudo(req, res) {
 }
 
 module.exports = {
+  obtenerMetodosPago,
+  obtenerHistorialPagos,
   obtenerPagosCliente,
   obtenerMensualidadesCliente,
   registrarPago,
