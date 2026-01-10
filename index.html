@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Skynet - Iniciar Sesión</title>
+  <link rel="icon" href="data:,">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet"/>
+  <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet"/>
+  <link rel="stylesheet" href="login.css">
+</head>
+<body>
+
+<header class="header">
+  <div class="header__brand">
+    <svg class="header__logo" viewBox="0 0 48 48" xmlns="http://www.w3.org/2000/svg">
+      <path d="M24 4C12.95 4 4 12.95 4 24s8.95 20 20 20 20-8.95 20-20S35.05 4 24 4z" fill="currentColor"/>
+    </svg>
+    <span class="header__title">Skynet</span>
+  </div>
+</header>
+
+<main class="main">
+  <div class="login-card">
+    <div class="login-card__header">
+      <h1 class="login-card__title">Bienvenido a Skynet</h1>
+      <p class="login-card__subtitle">Portal Administrativo de Gestión ISP</p>
+    </div>
+
+    <form id="formLogin" class="login-form">
+      <div class="form-group">
+        <label class="form-label">Usuario</label>
+        <div class="input-wrapper">
+          <span class="material-symbols-outlined input-icon">person</span>
+          <input type="text" id="usuario" class="form-input" placeholder="Ingresa tu usuario"/>
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label">Contraseña</label>
+        <div class="input-wrapper">
+          <span class="material-symbols-outlined input-icon">lock</span>
+          <input type="password" id="contrasena" class="form-input" placeholder="Ingresa tu contraseña"/>
+          <span class="material-symbols-outlined input-icon-right toggle-password">visibility</span>
+        </div>
+      </div>
+
+      <div class="form-options">
+        <label class="checkbox-wrapper">
+          <input type="checkbox" class="checkbox"/>
+          <span class="checkbox-label">Mantener sesión iniciada</span>
+        </label>
+        <a href="#" class="forgot-link">¿Olvidaste tu contraseña?</a>
+      </div>
+
+      <button type="submit" class="btn-login" id="btnLogin">Iniciar Sesión</button>
+
+      <div class="secure-badge">
+        <span class="material-symbols-outlined secure-icon">verified_user</span>
+        <span class="secure-text">Acceso Administrativo Seguro</span>
+      </div>
+    </form>
+  </div>
+</main>
+
+<footer class="footer">
+  © 2024 Skynet Systems. Todos los derechos reservados. Versión 1.0.10
+</footer>
+
+<!-- Toast Container -->
+<div id="toast-container" class="toast-container"></div>
+
+<script>
+const API = "https://skynet-backend-a47423108e2a.herokuapp.com";
+
+// Sistema de Toasts
+function toast(mensaje, tipo = 'info', duracion = 4000) {
+  const contenedor = document.getElementById('toast-container');
+  
+  const iconos = {
+    success: 'check_circle',
+    error: 'error',
+    warning: 'warning',
+    info: 'info'
+  };
+  
+  const titulos = {
+    success: 'Éxito',
+    error: 'Error',
+    warning: 'Advertencia',
+    info: 'Información'
+  };
+  
+  const toastEl = document.createElement('div');
+  toastEl.className = `toast toast--${tipo}`;
+  toastEl.innerHTML = `
+    <div class="toast__icon">
+      <span class="material-symbols-outlined">${iconos[tipo]}</span>
+    </div>
+    <div class="toast__content">
+      <p class="toast__title">${titulos[tipo]}</p>
+      <p class="toast__message">${mensaje}</p>
+    </div>
+    <button class="toast__close" onclick="this.closest('.toast').remove()">
+      <span class="material-symbols-outlined">close</span>
+    </button>
+  `;
+  
+  contenedor.appendChild(toastEl);
+  
+  if (duracion > 0) {
+    setTimeout(() => {
+      toastEl.classList.add('hiding');
+      setTimeout(() => toastEl.remove(), 300);
+    }, duracion);
+  }
+}
+
+// Toggle password
+document.querySelector(".toggle-password").addEventListener("click", function() {
+  const input = document.getElementById("contrasena");
+  const esPassword = input.type === "password";
+  input.type = esPassword ? "text" : "password";
+  this.textContent = esPassword ? "visibility_off" : "visibility";
+});
+
+// Login
+document.getElementById("formLogin").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const usuario = document.getElementById("usuario").value.trim();
+  const contrasena = document.getElementById("contrasena").value;
+  const btn = document.getElementById("btnLogin");
+
+  if (!usuario || !contrasena) {
+    toast("Ingresa usuario y contraseña", "warning");
+    return;
+  }
+
+  // Loading
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> Iniciando...';
+
+  try {
+    const r = await fetch(API + "/api/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ usuario, contrasena })
+    });
+
+    const d = await r.json();
+
+    if (!d.ok) {
+      toast(d.mensaje || "Credenciales inválidas", "error");
+      btn.disabled = false;
+      btn.textContent = "Iniciar Sesión";
+      return;
+    }
+
+    toast("¡Bienvenido! Redirigiendo...", "success");
+    localStorage.setItem("token", d.token);
+    localStorage.setItem("usuario", JSON.stringify(d.usuario));
+    
+    setTimeout(() => {
+      window.location.href = "/skynet-frontend/dashboard/";
+    }, 1000);
+    
+  } catch (err) {
+    toast("Error de conexión con el servidor", "error");
+    btn.disabled = false;
+    btn.textContent = "Iniciar Sesión";
+  }
+});
+</script>
+
+<style>
+/* Toast styles inline para login */
+.toast-container {
+  position: fixed;
+  top: 1.5rem;
+  right: 1.5rem;
+  z-index: 9999;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  max-width: 24rem;
+}
+
+.toast {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.75rem;
+  padding: 1rem;
+  background-color: #fff;
+  border-radius: 0.75rem;
+  box-shadow: 0 10px 15px -3px rgba(0,0,0,0.1);
+  border-left: 4px solid #9ca3af;
+  animation: slideIn 0.3s ease;
+}
+
+@keyframes slideIn {
+  from { transform: translateX(100%); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
+
+.toast.hiding {
+  animation: slideOut 0.3s ease forwards;
+}
+
+@keyframes slideOut {
+  from { transform: translateX(0); opacity: 1; }
+  to { transform: translateX(100%); opacity: 0; }
+}
+
+.toast--success { border-left-color: #22c55e; }
+.toast--error { border-left-color: #ef4444; }
+.toast--warning { border-left-color: #f59e0b; }
+.toast--info { border-left-color: #3b82f6; }
+
+.toast__icon {
+  width: 1.5rem;
+  height: 1.5rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.toast--success .toast__icon { background-color: #dcfce7; color: #16a34a; }
+.toast--error .toast__icon { background-color: #fee2e2; color: #dc2626; }
+.toast--warning .toast__icon { background-color: #fef3c7; color: #d97706; }
+.toast--info .toast__icon { background-color: #dbeafe; color: #2563eb; }
+
+.toast__icon .material-symbols-outlined { font-size: 1rem; }
+
+.toast__content { flex: 1; }
+.toast__title { font-size: 0.875rem; font-weight: 600; color: #111827; margin-bottom: 0.125rem; }
+.toast__message { font-size: 0.8125rem; color: #4b5563; }
+
+.toast__close {
+  width: 1.5rem;
+  height: 1.5rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #9ca3af;
+  background: transparent;
+  border: none;
+  border-radius: 0.25rem;
+  cursor: pointer;
+}
+
+.toast__close:hover { background-color: #f3f4f6; color: #4b5563; }
+.toast__close .material-symbols-outlined { font-size: 1rem; }
+
+.spinner {
+  display: inline-block;
+  width: 1rem;
+  height: 1rem;
+  border: 2px solid rgba(255,255,255,0.3);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  margin-right: 0.5rem;
+}
+
+@keyframes spin { to { transform: rotate(360deg); } }
+
+@media (max-width: 480px) {
+  .toast-container {
+    top: 1rem;
+    right: 1rem;
+    left: 1rem;
+    max-width: none;
+  }
+}
+</style>
+
+</body>
+</html>

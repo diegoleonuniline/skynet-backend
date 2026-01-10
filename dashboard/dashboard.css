@@ -1,0 +1,95 @@
+/* ========================================
+   SKYNET - DASHBOARD CSS
+   ======================================== */
+
+.dashboard-grid {
+  display: grid;
+  grid-template-columns: 2fr 1fr;
+  gap: 2rem;
+}
+
+.dashboard-chart {
+  min-height: 400px;
+}
+
+.dashboard-transactions {
+  max-height: 400px;
+  display: flex;
+  flex-direction: column;
+}
+
+.dashboard-transactions .table-container {
+  flex: 1;
+  overflow-y: auto;
+}
+
+.chart-subtitle {
+  font-size: 0.875rem;
+  color: var(--gray-500);
+  margin-top: 0.25rem;
+}
+
+.chart-legend {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+.chart-legend__item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: var(--gray-600);
+}
+
+.chart-legend__dot {
+  width: 0.75rem;
+  height: 0.75rem;
+  border-radius: 50%;
+}
+
+.chart-legend__dot--primary {
+  background-color: var(--primary);
+}
+
+.chart-legend__dot--gray {
+  background-color: var(--gray-200);
+}
+
+.chart-placeholder {
+  height: 280px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  background-color: var(--gray-50);
+  border-radius: var(--radius-lg);
+  color: var(--gray-400);
+}
+
+.chart-placeholder .material-symbols-outlined {
+  font-size: 3rem;
+  margin-bottom: 0.5rem;
+}
+
+.chart-placeholder p {
+  font-size: 0.875rem;
+}
+
+@media (max-width: 1024px) {
+  .dashboard-grid {
+    grid-template-columns: 1fr;
+  }
+  
+  .dashboard-transactions {
+    max-height: none;
+  }
+}
+
+@media (max-width: 768px) {
+  .chart-legend {
+    display: none;
+  }
+}
