@@ -12,7 +12,7 @@ async function login(req, res) {
 
     const pool = obtenerPool();
     const [rows] = await pool.query(
-      'SELECT * FROM usuarios WHERE usuario = ? AND estado = 'activo',
+      'SELECT * FROM usuarios WHERE usuario = ? AND estado = "activo"',
       [usuario]
     );
 
