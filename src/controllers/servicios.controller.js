@@ -151,42 +151,50 @@ const create = async (req, res, next) => {
             [servicioId, req.userId]
         );
 
-        // Generar cargos iniciales
-        const [conceptoInstalacion] = await conn.query(
-            `SELECT id FROM cat_conceptos_cobro WHERE clave = 'INSTALACION' LIMIT 1`
-        );
-        const [conceptoProrrateo] = await conn.query(
-            `SELECT id FROM cat_conceptos_cobro WHERE clave = 'PRORRATEO' LIMIT 1`
-        );
-        const [conceptoMensualidad] = await conn.query(
-            `SELECT id FROM cat_conceptos_cobro WHERE clave = 'MENSUALIDAD' LIMIT 1`
-        );
+// Generar cargos iniciales
+const [conceptoInstalacion] = await conn.query(
+    `SELECT id FROM cat_conceptos_cobro WHERE clave = 'INSTALACION' LIMIT 1`
+);
+const [conceptoProrrateo] = await conn.query(
+    `SELECT id FROM cat_conceptos_cobro WHERE clave = 'PRORRATEO' LIMIT 1`
+);
+const [conceptoMensualidad] = await conn.query(
+    `SELECT id FROM cat_conceptos_cobro WHERE clave = 'MENSUALIDAD' LIMIT 1`
+);
 
-        // Cargo instalación
-        if (costo_instalacion > 0) {
-            await conn.query(
-                `INSERT INTO cargos (servicio_id, concepto_id, descripcion, monto, fecha_vencimiento, saldo_pendiente, created_by)
-                 VALUES (?, ?, 'Costo de instalación', ?, ?, ?, ?)`,
-                [servicioId, conceptoInstalacion[0]?.id || 3, costo_instalacion, fechaInstalacion, costo_instalacion, req.userId]
-            );
-        }
+// 1. Cargo instalación (si aplica)
+if (costo_instalacion > 0) {
+    await conn.query(
+        `INSERT INTO cargos (servicio_id, concepto_id, descripcion, monto, fecha_vencimiento, saldo_pendiente, created_by)
+         VALUES (?, ?, 'Costo de instalación', ?, ?, ?, ?)`,
+        [servicioId, conceptoInstalacion[0]?.id || 3, costo_instalacion, fechaInstalacion, costo_instalacion, req.userId]
+    );
+}
 
-        // Cargo prorrateo o primera mensualidad
-        if (prorrateo > 0) {
-            await conn.query(
-                `INSERT INTO cargos (servicio_id, concepto_id, descripcion, monto, fecha_vencimiento, periodo_mes, periodo_anio, saldo_pendiente, created_by)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-                [servicioId, conceptoProrrateo[0]?.id || 2, `Prorrateo ${diasProrrateo} días`, prorrateo, fechaPrimerVencimiento,
-                 new Date(fechaPrimerVencimiento).getMonth() + 1, new Date(fechaPrimerVencimiento).getFullYear(), prorrateo, req.userId]
-            );
-        } else {
-            await conn.query(
-                `INSERT INTO cargos (servicio_id, concepto_id, descripcion, monto, fecha_vencimiento, periodo_mes, periodo_anio, saldo_pendiente, created_by)
-                 VALUES (?, ?, 'Mensualidad', ?, ?, ?, ?, ?, ?)`,
-                [servicioId, conceptoMensualidad[0]?.id || 1, tarifa[0].monto, fechaPrimerVencimiento,
-                 new Date(fechaPrimerVencimiento).getMonth() + 1, new Date(fechaPrimerVencimiento).getFullYear(), tarifa[0].monto, req.userId]
-            );
-        }
+// 2. Cargo prorrateo (si aplica)
+if (prorrateo > 0) {
+    await conn.query(
+        `INSERT INTO cargos (servicio_id, concepto_id, descripcion, monto, fecha_vencimiento, periodo_mes, periodo_anio, saldo_pendiente, created_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [servicioId, conceptoProrrateo[0]?.id || 2, `Prorrateo ${diasProrrateo} días`, prorrateo, fechaPrimerVencimiento,
+         new Date(fechaPrimerVencimiento).getMonth() + 1, new Date(fechaPrimerVencimiento).getFullYear(), prorrateo, req.userId]
+    );
+}
+
+// 3. Primera mensualidad (SIEMPRE se genera)
+let fechaMensualidad = new Date(fechaPrimerVencimiento);
+if (prorrateo > 0) {
+    // Si hay prorrateo, la mensualidad vence 1 mes después
+    fechaMensualidad.setMonth(fechaMensualidad.getMonth() + 1);
+}
+const fechaMensualidadStr = fechaMensualidad.toISOString().split('T')[0];
+
+await conn.query(
+    `INSERT INTO cargos (servicio_id, concepto_id, descripcion, monto, fecha_vencimiento, periodo_mes, periodo_anio, saldo_pendiente, created_by)
+     VALUES (?, ?, 'Mensualidad', ?, ?, ?, ?, ?, ?)`,
+    [servicioId, conceptoMensualidad[0]?.id || 1, tarifa[0].monto, fechaMensualidadStr,
+     fechaMensualidad.getMonth() + 1, fechaMensualidad.getFullYear(), tarifa[0].monto, req.userId]
+);
 
         // Agregar equipos
         if (equipos && equipos.length > 0) {
