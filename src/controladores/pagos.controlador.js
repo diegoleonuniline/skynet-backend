@@ -18,22 +18,53 @@ async function obtenerMetodosPago(req, res) {
 async function obtenerHistorialPagos(req, res) {
   try {
     const { cliente_id } = req.params;
+    const { fecha_inicio, fecha_fin, estado } = req.query;
     const pool = obtenerPool();
-    const [pagos] = await pool.query(
-      `SELECT p.*, 
-              CASE p.metodo_pago
-                WHEN 'efectivo' THEN 'Efectivo'
-                WHEN 'transferencia' THEN 'Transferencia'
-                WHEN 'tarjeta' THEN 'Tarjeta'
-                WHEN 'deposito' THEN 'Depósito'
-                ELSE 'Otro'
-              END as metodo_nombre
-       FROM pagos p
-       WHERE p.cliente_id = ?
-       ORDER BY p.fecha_pago DESC`,
-      [cliente_id]
-    );
-    res.json({ ok: true, pagos });
+    
+    let query = `
+      SELECT p.*, 
+        CASE p.metodo_pago
+          WHEN 'efectivo' THEN 'Efectivo'
+          WHEN 'transferencia' THEN 'Transferencia'
+          WHEN 'tarjeta' THEN 'Tarjeta'
+          WHEN 'deposito' THEN 'Depósito'
+          ELSE 'Otro'
+        END as metodo_nombre
+      FROM pagos p
+      WHERE p.cliente_id = ?
+    `;
+    const params = [cliente_id];
+    
+    if (fecha_inicio) {
+      query += ' AND DATE(p.fecha_pago) >= ?';
+      params.push(fecha_inicio);
+    }
+    if (fecha_fin) {
+      query += ' AND DATE(p.fecha_pago) <= ?';
+      params.push(fecha_fin);
+    }
+    if (estado && estado !== 'todos') {
+      query += ' AND p.estado = ?';
+      params.push(estado);
+    }
+    
+    query += ' ORDER BY p.fecha_pago DESC';
+    
+    const [pagos] = await pool.query(query, params);
+    
+    // Calcular totales
+    const totalActivos = pagos.filter(p => p.estado === 'activo').reduce((sum, p) => sum + parseFloat(p.monto), 0);
+    const totalCancelados = pagos.filter(p => p.estado === 'cancelado').reduce((sum, p) => sum + parseFloat(p.monto), 0);
+    
+    res.json({ 
+      ok: true, 
+      pagos,
+      resumen: {
+        total_activos: totalActivos,
+        total_cancelados: totalCancelados,
+        cantidad: pagos.length
+      }
+    });
   } catch (err) {
     console.error('❌ Error:', err.message);
     res.status(500).json({ ok: false, mensaje: 'Error al obtener historial' });
@@ -88,7 +119,7 @@ async function obtenerMensualidadesCliente(req, res) {
   }
 }
 
-// REGISTRAR PAGO - APLICA AUTOMÁTICAMENTE A CARGOS PENDIENTES
+// REGISTRAR PAGO - CORREGIDO
 async function registrarPago(req, res) {
   const pool = obtenerPool();
   const connection = await pool.getConnection();
@@ -107,7 +138,8 @@ async function registrarPago(req, res) {
       return res.status(400).json({ ok: false, mensaje: 'Cliente y monto válido requeridos' });
     }
 
-    let montoTotal = parseFloat(monto);
+    const montoRecibido = parseFloat(monto);
+    let montoAplicar = montoRecibido;
     let montoDescontadoSaldo = 0;
 
     // Usar saldo a favor si se solicita
@@ -115,17 +147,18 @@ async function registrarPago(req, res) {
       const [cliente] = await connection.query('SELECT saldo_favor FROM clientes WHERE id = ?', [cliente_id]);
       const saldoDisponible = parseFloat(cliente[0]?.saldo_favor || 0);
       if (saldoDisponible > 0) {
-        montoDescontadoSaldo = Math.min(saldoDisponible, montoTotal);
-        montoTotal += montoDescontadoSaldo; // Suma el saldo a favor al monto a aplicar
+        montoDescontadoSaldo = saldoDisponible; // Usa todo el saldo disponible
+        montoAplicar = montoRecibido + montoDescontadoSaldo;
         await connection.query(
-          'UPDATE clientes SET saldo_favor = saldo_favor - ? WHERE id = ?',
-          [montoDescontadoSaldo, cliente_id]
+          'UPDATE clientes SET saldo_favor = 0 WHERE id = ?',
+          [cliente_id]
         );
       }
     }
 
-    let montoRestante = montoTotal;
+    let montoRestante = montoAplicar;
     let cargosAplicados = 0;
+    let totalAplicadoACargos = 0;
     let detalleAplicacion = [];
 
     // 1. Obtener mensualidades pendientes (más antiguas primero)
@@ -148,7 +181,7 @@ async function registrarPago(req, res) {
       [cliente_id]
     );
 
-    const cargosPendientes = [...mensualidades, ...instalaciones];
+    const cargosPendientes = [...instalaciones, ...mensualidades];
 
     // 3. Aplicar pago a cada cargo (FIFO)
     for (const cargo of cargosPendientes) {
@@ -173,8 +206,9 @@ async function registrarPago(req, res) {
         );
       }
 
-      detalleAplicacion.push(`${cargo.concepto}: $${aplicar.toFixed(2)}`);
+      detalleAplicacion.push(`${cargo.concepto || cargo.tipo}: $${aplicar.toFixed(2)}`);
       montoRestante -= aplicar;
+      totalAplicadoACargos += aplicar;
       cargosAplicados++;
     }
 
@@ -189,7 +223,7 @@ async function registrarPago(req, res) {
       detalleAplicacion.push(`Saldo a favor: $${montoRestante.toFixed(2)}`);
     }
 
-    // 5. Insertar registro del pago
+    // 5. Insertar registro del pago (solo el monto recibido, no el total aplicado)
     const [result] = await connection.query(
       `INSERT INTO pagos (
         cliente_id, monto, metodo_pago, referencia, banco,
@@ -197,7 +231,7 @@ async function registrarPago(req, res) {
         aplicado_a, cargos_aplicados, estado
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'activo')`,
       [
-        cliente_id, monto, metodo_pago_id || 'efectivo', referencia || null, banco || null,
+        cliente_id, montoRecibido, metodo_pago_id || 'efectivo', referencia || null, banco || null,
         quien_paga || null, telefono_quien_paga || null, comprobante_url || null, observaciones || null,
         detalleAplicacion.join(' | '), cargosAplicados
       ]
@@ -213,8 +247,9 @@ async function registrarPago(req, res) {
       mensaje: 'Pago registrado y aplicado',
       pago: {
         id: result.insertId,
-        monto: parseFloat(monto),
+        monto: montoRecibido,
         cargos_aplicados: cargosAplicados,
+        total_aplicado: totalAplicadoACargos,
         nuevo_saldo_favor: nuevoSaldoFavor,
         saldo_usado: montoDescontadoSaldo,
         detalle: detalleAplicacion
@@ -230,7 +265,7 @@ async function registrarPago(req, res) {
   }
 }
 
-// CANCELAR PAGO - Revierte y agrega a saldo a favor
+// CANCELAR PAGO - CORREGIDO (no revierte cargos, solo agrega monto original a saldo)
 async function cancelarPago(req, res) {
   const pool = obtenerPool();
   const connection = await pool.getConnection();
@@ -258,7 +293,8 @@ async function cancelarPago(req, res) {
     const montoRevertir = parseFloat(pago.monto);
     const clienteId = pago.cliente_id;
 
-    // Agregar monto a saldo a favor del cliente
+    // Solo agregar el monto ORIGINAL del pago a saldo a favor
+    // NO revertimos los cargos porque eso complicaría la contabilidad
     await connection.query(
       'UPDATE clientes SET saldo_favor = saldo_favor + ? WHERE id = ?',
       [montoRevertir, clienteId]
@@ -274,8 +310,8 @@ async function cancelarPago(req, res) {
       [motivo || 'Cancelado por usuario', id]
     );
 
-    // Actualizar saldos del cliente
-    await actualizarSaldosCliente(connection, clienteId);
+    // NO actualizamos saldo_pendiente porque los cargos siguen "pagados"
+    // El saldo a favor compensa esto
 
     await connection.commit();
 
@@ -293,7 +329,7 @@ async function cancelarPago(req, res) {
   }
 }
 
-// EDITAR PAGO (solo campos informativos, no el monto)
+// EDITAR PAGO
 async function editarPago(req, res) {
   try {
     const { id } = req.params;
@@ -316,7 +352,7 @@ async function editarPago(req, res) {
   }
 }
 
-// OBTENER ADEUDO DE CLIENTE
+// OBTENER ADEUDO
 async function obtenerAdeudo(req, res) {
   try {
     const { cliente_id } = req.params;
@@ -360,7 +396,6 @@ async function obtenerAdeudo(req, res) {
 
 // HELPER: Actualizar saldos del cliente
 async function actualizarSaldosCliente(connection, clienteId) {
-  // Calcular total pendiente
   const [mensualidades] = await connection.query(
     `SELECT SUM(monto - COALESCE(monto_pagado, 0)) as total 
      FROM mensualidades 
