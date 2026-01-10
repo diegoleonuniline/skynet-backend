@@ -140,7 +140,6 @@ async function registrarPago(req, res) {
       banco,
       quien_paga,
       telefono_quien_paga,
-      comprobante_url,
       observaciones
     } = req.body;
     
@@ -163,9 +162,9 @@ async function registrarPago(req, res) {
     // 1. CREAR REGISTRO DEL PAGO
     const pagoId = generarUUID();
     await connection.query(`
-      INSERT INTO pagos (id, cliente_id, monto, metodo_pago_id, referencia, banco, quien_paga, telefono_quien_paga, comprobante_url, observaciones)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `, [pagoId, cliente_id, monto, metodo_pago_id, referencia, banco, quien_paga, telefono_quien_paga, comprobante_url, observaciones]);
+      INSERT INTO pagos (id, cliente_id, monto, metodo_pago_id, referencia, banco, quien_paga, telefono_quien_paga, observaciones)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `, [pagoId, cliente_id, monto, metodo_pago_id, referencia, banco, quien_paga, telefono_quien_paga, observaciones]);
     
     // 2. CALCULAR MONTO TOTAL A APLICAR (pago + saldo a favor)
     const saldoFavorActual = parseFloat(cliente[0].saldo_favor) || 0;
