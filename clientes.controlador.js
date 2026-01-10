@@ -13,6 +13,25 @@ async function generarNumeroCliente(pool) {
   return `SKY-${num}`;
 }
 
+// ========================================
+// REGISTRAR CAMBIO EN HISTORIAL
+// ========================================
+async function registrarCambio(pool, tabla, registroId, campo, valorAnterior, valorNuevo, usuarioId) {
+  if (valorAnterior === valorNuevo) return;
+  try {
+    const id = generarUUID();
+    await pool.query(
+      'INSERT INTO historial_cambios (id, tabla, registro_id, campo, valor_anterior, valor_nuevo, usuario_id) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      [id, tabla, registroId, campo, valorAnterior?.toString() || null, valorNuevo?.toString() || null, usuarioId || null]
+    );
+  } catch (err) {
+    console.error('⚠️ Error al registrar historial:', err.message);
+  }
+}
+
+// ========================================
+// OBTENER CLIENTES (con paginación y filtros)
+// ========================================
 async function obtenerClientes(req, res) {
   try {
     const { pagina = 1, limite = 10, estado, busqueda, ciudad_id, colonia_id, plan_id } = req.query;
@@ -28,9 +47,9 @@ async function obtenerClientes(req, res) {
     }
 
     if (busqueda) {
-      whereClause += ` AND (c.nombre LIKE ? OR c.apellido_paterno LIKE ? OR c.telefono LIKE ? OR c.numero_cliente LIKE ?)`;
+      whereClause += ` AND (c.nombre LIKE ? OR c.apellido_paterno LIKE ? OR c.telefono LIKE ? OR c.numero_cliente LIKE ? OR c.direccion_calle LIKE ?)`;
       const busq = `%${busqueda}%`;
-      params.push(busq, busq, busq, busq);
+      params.push(busq, busq, busq, busq, busq);
     }
 
     if (ciudad_id) {
@@ -83,6 +102,9 @@ async function obtenerClientes(req, res) {
   }
 }
 
+// ========================================
+// OBTENER UN CLIENTE
+// ========================================
 async function obtenerCliente(req, res) {
   try {
     const { id } = req.params;
@@ -112,14 +134,19 @@ async function obtenerCliente(req, res) {
   }
 }
 
+// ========================================
+// CREAR CLIENTE (solo datos básicos)
+// ========================================
 async function crearCliente(req, res) {
   try {
     const {
       nombre, apellido_paterno, apellido_materno,
-      telefono, telefono_secundario, email,
-      ciudad_id, colonia_id, direccion, referencia,
-      plan_id, cuota_mensual, tarifa_mensual, costo_instalacion,
-      fecha_instalacion, dia_corte
+      telefono, telefono_secundario, telefono_terciario, email,
+      ciudad_id, colonia_id, codigo_postal,
+      direccion, direccion_calle, direccion_numero, direccion_interior,
+      referencia, coordenadas_gps,
+      plan_id,
+      ine_frente, ine_reverso
     } = req.body;
 
     if (!nombre || !telefono) {
@@ -129,48 +156,33 @@ async function crearCliente(req, res) {
     const pool = obtenerPool();
     const id = generarUUID();
     const numero_cliente = await generarNumeroCliente(pool);
-    const tarifa = tarifa_mensual || cuota_mensual || 0;
 
-    await pool.query(
-      `INSERT INTO clientes (
+    await pool.query(`
+      INSERT INTO clientes (
         id, numero_cliente, nombre, apellido_paterno, apellido_materno,
-        telefono, telefono_secundario, email,
-        ciudad_id, colonia_id, direccion, referencia,
-        plan_id, cuota_mensual, tarifa_mensual, costo_instalacion,
-        fecha_instalacion, dia_corte, creado_por
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        id, numero_cliente, nombre, apellido_paterno || null, apellido_materno || null,
-        telefono, telefono_secundario || null, email || null,
-        ciudad_id || null, colonia_id || null, direccion || null, referencia || null,
-        plan_id || null, tarifa, tarifa, costo_instalacion || 0,
-        fecha_instalacion || null, dia_corte || 10, req.usuario?.usuario_id || null
-      ]
-    );
-
-    // GENERAR CARGOS AUTOMÁTICOS si tiene fecha de instalación y tarifa
-    let cargosGenerados = [];
-    if (fecha_instalacion && tarifa > 0) {
-      try {
-        const { generarCargosIniciales } = require('./cargos.controlador');
-        cargosGenerados = await generarCargosIniciales(
-          id,
-          fecha_instalacion,
-          parseFloat(tarifa),
-          parseFloat(costo_instalacion) || 0,
-          dia_corte || 10
-        );
-        console.log('✅ Cargos generados para cliente:', cargosGenerados);
-      } catch (errCargos) {
-        console.error('⚠️ Error al generar cargos iniciales:', errCargos.message);
-      }
-    }
+        telefono, telefono_secundario, telefono_terciario, email,
+        ciudad_id, colonia_id, codigo_postal,
+        direccion, direccion_calle, direccion_numero, direccion_interior,
+        referencia, coordenadas_gps,
+        plan_id,
+        ine_frente, ine_reverso,
+        creado_por
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `, [
+      id, numero_cliente, nombre, apellido_paterno || null, apellido_materno || null,
+      telefono, telefono_secundario || null, telefono_terciario || null, email || null,
+      ciudad_id || null, colonia_id || null, codigo_postal || null,
+      direccion || null, direccion_calle || null, direccion_numero || null, direccion_interior || null,
+      referencia || null, coordenadas_gps || null,
+      plan_id || null,
+      ine_frente || null, ine_reverso || null,
+      req.usuario?.usuario_id || null
+    ]);
 
     res.json({ 
       ok: true, 
       mensaje: 'Cliente creado', 
-      cliente: { id, numero_cliente },
-      cargos_generados: cargosGenerados
+      cliente: { id, numero_cliente }
     });
   } catch (err) {
     console.error('❌ Error crearCliente:', err.message);
@@ -178,31 +190,73 @@ async function crearCliente(req, res) {
   }
 }
 
+// ========================================
+// ACTUALIZAR CLIENTE (con historial de cambios)
+// ========================================
 async function actualizarCliente(req, res) {
   try {
     const { id } = req.params;
+    const pool = obtenerPool();
+    const usuarioId = req.usuario?.usuario_id || null;
+
+    // Obtener datos anteriores
+    const [anterior] = await pool.query('SELECT * FROM clientes WHERE id = ?', [id]);
+    if (!anterior.length) {
+      return res.status(404).json({ ok: false, mensaje: 'Cliente no encontrado' });
+    }
+    const clienteAnterior = anterior[0];
+
     const {
       nombre, apellido_paterno, apellido_materno,
-      telefono, telefono_secundario, email,
-      ciudad_id, colonia_id, direccion, referencia,
-      plan_id, cuota_mensual, tarifa_mensual, estado, dia_corte
+      telefono, telefono_secundario, telefono_terciario, email,
+      ciudad_id, colonia_id, codigo_postal,
+      direccion, direccion_calle, direccion_numero, direccion_interior,
+      referencia, coordenadas_gps,
+      plan_id,
+      ine_frente, ine_reverso,
+      estado
     } = req.body;
 
-    const pool = obtenerPool();
-    const tarifa = tarifa_mensual || cuota_mensual || 0;
+    // Campos a actualizar
+    const camposActualizados = {
+      nombre, apellido_paterno, apellido_materno,
+      telefono, telefono_secundario, telefono_terciario, email,
+      ciudad_id, colonia_id, codigo_postal,
+      direccion, direccion_calle, direccion_numero, direccion_interior,
+      referencia, coordenadas_gps,
+      plan_id,
+      ine_frente, ine_reverso,
+      estado: estado || 'activo'
+    };
 
-    await pool.query(
-      `UPDATE clientes SET 
+    // Registrar cambios en historial
+    for (const [campo, valorNuevo] of Object.entries(camposActualizados)) {
+      if (valorNuevo !== undefined) {
+        await registrarCambio(pool, 'clientes', id, campo, clienteAnterior[campo], valorNuevo, usuarioId);
+      }
+    }
+
+    await pool.query(`
+      UPDATE clientes SET 
         nombre = ?, apellido_paterno = ?, apellido_materno = ?,
-        telefono = ?, telefono_secundario = ?, email = ?,
-        ciudad_id = ?, colonia_id = ?, direccion = ?, referencia = ?,
-        plan_id = ?, cuota_mensual = ?, tarifa_mensual = ?, estado = ?, dia_corte = ?
+        telefono = ?, telefono_secundario = ?, telefono_terciario = ?, email = ?,
+        ciudad_id = ?, colonia_id = ?, codigo_postal = ?,
+        direccion = ?, direccion_calle = ?, direccion_numero = ?, direccion_interior = ?,
+        referencia = ?, coordenadas_gps = ?,
+        plan_id = ?,
+        ine_frente = ?, ine_reverso = ?,
+        estado = ?
        WHERE id = ?`,
       [
         nombre, apellido_paterno, apellido_materno,
-        telefono, telefono_secundario, email,
-        ciudad_id, colonia_id, direccion, referencia,
-        plan_id, tarifa, tarifa, estado || 'activo', dia_corte || 10, id
+        telefono, telefono_secundario, telefono_terciario, email,
+        ciudad_id, colonia_id, codigo_postal,
+        direccion, direccion_calle, direccion_numero, direccion_interior,
+        referencia, coordenadas_gps,
+        plan_id,
+        ine_frente, ine_reverso,
+        estado || 'activo',
+        id
       ]
     );
 
@@ -213,44 +267,107 @@ async function actualizarCliente(req, res) {
   }
 }
 
-async function eliminarCliente(req, res) {
+// ========================================
+// CANCELAR CLIENTE
+// ========================================
+async function cancelarCliente(req, res) {
+  try {
+    const { id } = req.params;
+    const { motivo_cancelacion } = req.body;
+    const pool = obtenerPool();
+
+    await pool.query(
+      `UPDATE clientes SET estado = 'cancelado', fecha_cancelacion = CURDATE(), motivo_cancelacion = ? WHERE id = ?`,
+      [motivo_cancelacion || null, id]
+    );
+
+    // Registrar en historial
+    await registrarCambio(pool, 'clientes', id, 'estado', 'activo', 'cancelado', req.usuario?.usuario_id);
+
+    res.json({ ok: true, mensaje: 'Cliente cancelado' });
+  } catch (err) {
+    console.error('❌ Error cancelarCliente:', err.message);
+    res.status(500).json({ ok: false, mensaje: 'Error al cancelar cliente' });
+  }
+}
+
+// ========================================
+// OBTENER HISTORIAL DE CAMBIOS
+// ========================================
+async function obtenerHistorialCambios(req, res) {
   try {
     const { id } = req.params;
     const pool = obtenerPool();
 
-    await pool.query(
-      `UPDATE clientes SET estado = 'cancelado', fecha_cancelacion = NOW() WHERE id = ?`,
-      [id]
-    );
+    const [rows] = await pool.query(`
+      SELECT h.*, u.nombre_completo as usuario_nombre
+      FROM historial_cambios h
+      LEFT JOIN usuarios u ON u.id = h.usuario_id
+      WHERE h.registro_id = ?
+      ORDER BY h.creado_en DESC
+    `, [id]);
 
-    res.json({ ok: true, mensaje: 'Cliente cancelado' });
+    res.json({ ok: true, historial: rows });
   } catch (err) {
-    console.error('❌ Error eliminarCliente:', err.message);
-    res.status(500).json({ ok: false, mensaje: 'Error al eliminar cliente' });
+    console.error('❌ Error obtenerHistorialCambios:', err.message);
+    res.status(500).json({ ok: false, mensaje: 'Error al obtener historial' });
   }
 }
 
+// ========================================
+// ESTADÍSTICAS
+// ========================================
 async function obtenerEstadisticas(req, res) {
   try {
     const pool = obtenerPool();
     
     const [stats] = await pool.query(`
       SELECT 
+        COUNT(*) as total,
         COUNT(CASE WHEN estado = 'activo' THEN 1 END) as activos,
         COUNT(CASE WHEN estado = 'cancelado' THEN 1 END) as cancelados,
         COUNT(CASE WHEN estado = 'suspendido' THEN 1 END) as suspendidos,
-        COALESCE(SUM(COALESCE(tarifa_mensual, cuota_mensual)), 0) as ingreso_potencial
+        COALESCE(SUM(CASE WHEN estado = 'activo' THEN COALESCE(tarifa_mensual, cuota_mensual) END), 0) as ingreso_potencial,
+        COALESCE(SUM(saldo_pendiente), 0) as total_adeudo,
+        COALESCE(SUM(saldo_favor), 0) as total_favor
       FROM clientes
+    `);
+    
+    // Clientes por ciudad
+    const [porCiudad] = await pool.query(`
+      SELECT ci.nombre as ciudad, COUNT(c.id) as cantidad
+      FROM clientes c
+      LEFT JOIN catalogo_ciudades ci ON ci.id = c.ciudad_id
+      WHERE c.estado = 'activo'
+      GROUP BY c.ciudad_id
+      ORDER BY cantidad DESC
+    `);
+
+    // Clientes por colonia
+    const [porColonia] = await pool.query(`
+      SELECT co.nombre as colonia, ci.nombre as ciudad, COUNT(c.id) as cantidad
+      FROM clientes c
+      LEFT JOIN catalogo_colonias co ON co.id = c.colonia_id
+      LEFT JOIN catalogo_ciudades ci ON ci.id = c.ciudad_id
+      WHERE c.estado = 'activo'
+      GROUP BY c.colonia_id
+      ORDER BY cantidad DESC
+      LIMIT 20
     `);
     
     res.json({
       ok: true,
       estadisticas: {
-        clientes_activos: stats[0].activos || 0,
-        clientes_cancelados: stats[0].cancelados || 0,
-        clientes_suspendidos: stats[0].suspendidos || 0,
-        ingreso_potencial: parseFloat(stats[0].ingreso_potencial) || 0
-      }
+        total: stats[0].total || 0,
+        activos: stats[0].activos || 0,
+        cancelados: stats[0].cancelados || 0,
+        suspendidos: stats[0].suspendidos || 0,
+        ingreso_potencial: parseFloat(stats[0].ingreso_potencial) || 0,
+        total_adeudo: parseFloat(stats[0].total_adeudo) || 0,
+        total_favor: parseFloat(stats[0].total_favor) || 0
+      },
+      por_ciudad: porCiudad,
+      por_colonia: porColonia
     });
   } catch (err) {
     console.error('❌ Error obtenerEstadisticas:', err.message);
@@ -263,6 +380,7 @@ module.exports = {
   obtenerCliente,
   crearCliente,
   actualizarCliente,
-  eliminarCliente,
+  cancelarCliente,
+  obtenerHistorialCambios,
   obtenerEstadisticas
 };

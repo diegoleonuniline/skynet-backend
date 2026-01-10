@@ -1,5 +1,4 @@
 const { obtenerPool } = require('../configuracion/base_datos');
-const { actualizarSaldoCliente } = require('./cargos.controlador');
 
 function generarUUID() {
   return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
@@ -11,7 +10,6 @@ function generarUUID() {
 // ========================================
 // CATÁLOGO DE MÉTODOS DE PAGO
 // ========================================
-
 async function obtenerMetodosPago(req, res) {
   try {
     const pool = obtenerPool();
@@ -42,86 +40,64 @@ async function crearMetodoPago(req, res) {
 }
 
 // ========================================
-// OBTENER PAGOS
+// OBTENER ESTADO DE CUENTA DEL CLIENTE
 // ========================================
-
-async function obtenerPagos(req, res) {
+async function obtenerEstadoCuenta(req, res) {
   try {
-    const { cliente_id, desde, hasta, limite = 50 } = req.query;
+    const { cliente_id } = req.params;
     const pool = obtenerPool();
-    
-    let sql = `
-      SELECT p.*, 
-             mp.nombre as metodo_nombre,
-             c.nombre as cliente_nombre, c.apellido_paterno as cliente_apellido
-      FROM pagos p
-      LEFT JOIN metodos_pago mp ON mp.id = p.metodo_pago_id
-      LEFT JOIN clientes c ON c.id = p.cliente_id
-      WHERE 1=1
-    `;
-    const params = [];
-    
-    if (cliente_id) {
-      sql += ' AND p.cliente_id = ?';
-      params.push(cliente_id);
-    }
-    
-    if (desde) {
-      sql += ' AND DATE(p.fecha_pago) >= ?';
-      params.push(desde);
-    }
-    
-    if (hasta) {
-      sql += ' AND DATE(p.fecha_pago) <= ?';
-      params.push(hasta);
-    }
-    
-    sql += ' ORDER BY p.fecha_pago DESC LIMIT ?';
-    params.push(parseInt(limite));
-    
-    const [rows] = await pool.query(sql, params);
-    res.json({ ok: true, pagos: rows });
-  } catch (err) {
-    console.error('❌ Error obtenerPagos:', err.message);
-    res.status(500).json({ ok: false, mensaje: 'Error al obtener pagos' });
-  }
-}
 
-async function obtenerPagoPorId(req, res) {
-  try {
-    const { id } = req.params;
-    const pool = obtenerPool();
-    
-    const [pago] = await pool.query(`
-      SELECT p.*, mp.nombre as metodo_nombre
-      FROM pagos p
-      LEFT JOIN metodos_pago mp ON mp.id = p.metodo_pago_id
-      WHERE p.id = ?
-    `, [id]);
-    
-    if (!pago.length) {
-      return res.status(404).json({ ok: false, mensaje: 'Pago no encontrado' });
+    // Info cliente
+    const [cliente] = await pool.query(
+      'SELECT id, numero_cliente, nombre, apellido_paterno, saldo_favor, saldo_pendiente, tarifa_mensual, dia_corte FROM clientes WHERE id = ?',
+      [cliente_id]
+    );
+
+    if (!cliente.length) {
+      return res.status(404).json({ ok: false, mensaje: 'Cliente no encontrado' });
     }
-    
-    // Obtener detalle de aplicación
-    const [detalle] = await pool.query(`
-      SELECT pd.*, c.concepto as cargo_concepto
-      FROM pagos_detalle pd
-      LEFT JOIN cargos c ON c.id = pd.cargo_id
-      WHERE pd.pago_id = ?
-    `, [id]);
-    
-    res.json({ ok: true, pago: pago[0], detalle });
+
+    // Instalación pendiente
+    const [instalacion] = await pool.query(
+      'SELECT id, monto, monto_pagado, (monto - monto_pagado) as saldo, estado, fecha_instalacion FROM instalaciones WHERE cliente_id = ? AND estado IN ("pendiente", "parcial") ORDER BY creado_en DESC LIMIT 1',
+      [cliente_id]
+    );
+
+    // Mensualidades pendientes (incluye prorrateo)
+    const [mensualidades] = await pool.query(`
+      SELECT id, periodo, monto, monto_pagado, (monto - monto_pagado) as saldo, 
+             es_prorrateado, dias_prorrateados, fecha_vencimiento, estado
+      FROM mensualidades 
+      WHERE cliente_id = ? AND estado IN ('pendiente', 'parcial', 'vencido')
+      ORDER BY fecha_vencimiento ASC
+    `, [cliente_id]);
+
+    // Calcular adeudo total
+    let totalAdeudo = 0;
+    if (instalacion.length && instalacion[0].estado !== 'pagado') {
+      totalAdeudo += parseFloat(instalacion[0].saldo) || 0;
+    }
+    for (const m of mensualidades) {
+      totalAdeudo += parseFloat(m.saldo) || 0;
+    }
+
+    res.json({
+      ok: true,
+      cliente: cliente[0],
+      instalacion: instalacion[0] || null,
+      mensualidades,
+      total_adeudo: Math.round(totalAdeudo * 100) / 100,
+      saldo_favor: parseFloat(cliente[0].saldo_favor) || 0
+    });
   } catch (err) {
-    console.error('❌ Error obtenerPagoPorId:', err.message);
-    res.status(500).json({ ok: false, mensaje: 'Error al obtener pago' });
+    console.error('❌ Error obtenerEstadoCuenta:', err.message);
+    res.status(500).json({ ok: false, mensaje: 'Error al obtener estado de cuenta' });
   }
 }
 
 // ========================================
 // REGISTRAR PAGO Y APLICAR AUTOMÁTICAMENTE
 // ========================================
-
 async function registrarPago(req, res) {
   const pool = obtenerPool();
   const connection = await pool.getConnection();
@@ -134,6 +110,8 @@ async function registrarPago(req, res) {
       monto,
       metodo_pago_id,
       referencia,
+      numero_recibo,
+      tipo_banco,
       banco,
       quien_paga,
       telefono_quien_paga,
@@ -162,9 +140,14 @@ async function registrarPago(req, res) {
     // 1. CREAR REGISTRO DEL PAGO
     const pagoId = generarUUID();
     await connection.query(`
-      INSERT INTO pagos (id, cliente_id, tipo, monto, metodo_pago_id, referencia, banco, quien_paga, telefono_quien_paga, comprobante_url, observaciones)
-      VALUES (?, ?, 'otro', ?, ?, ?, ?, ?, ?, ?, ?)
-    `, [pagoId, cliente_id, monto, metodo_pago_id || null, referencia || null, banco || null, quien_paga || null, telefono_quien_paga || null, comprobante_url || null, observaciones || null]);
+      INSERT INTO pagos (id, cliente_id, tipo, monto, metodo_pago_id, referencia, numero_recibo, tipo_banco, banco, quien_paga, telefono_quien_paga, comprobante_url, observaciones, recibido_por)
+      VALUES (?, ?, 'otro', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `, [
+      pagoId, cliente_id, monto, metodo_pago_id || null, referencia || null,
+      numero_recibo || null, tipo_banco || null, banco || null,
+      quien_paga || null, telefono_quien_paga || null, comprobante_url || null,
+      observaciones || null, req.usuario?.usuario_id || null
+    ]);
     
     // 2. CALCULAR MONTO TOTAL A APLICAR (pago + saldo a favor)
     const saldoFavorActual = parseFloat(cliente[0].saldo_favor) || 0;
@@ -172,70 +155,114 @@ async function registrarPago(req, res) {
     
     console.log('💰 Monto disponible:', montoDisponible, '(pago:', monto, '+ saldo favor:', saldoFavorActual, ')');
     
-    // 3. OBTENER CARGOS PENDIENTES (ordenados por fecha de vencimiento)
-    const [cargosPendientes] = await connection.query(`
-      SELECT id, concepto, monto, monto_pagado, saldo_pendiente
-      FROM cargos 
-      WHERE cliente_id = ? AND estado IN ('pendiente', 'parcial')
-      ORDER BY fecha_vencimiento ASC
-    `, [cliente_id]);
-    
-    console.log('📋 Cargos pendientes:', cargosPendientes.length);
-    
-    // 4. APLICAR PAGO A CADA CARGO
     const detalleAplicacion = [];
     
-    for (const cargo of cargosPendientes) {
-      if (montoDisponible <= 0) break;
+    // 3. PRIMERO: APLICAR A INSTALACIÓN PENDIENTE
+    const [instalacionPendiente] = await connection.query(
+      'SELECT id, monto, monto_pagado FROM instalaciones WHERE cliente_id = ? AND estado IN ("pendiente", "parcial") ORDER BY creado_en ASC LIMIT 1',
+      [cliente_id]
+    );
+    
+    if (instalacionPendiente.length > 0 && montoDisponible > 0) {
+      const inst = instalacionPendiente[0];
+      const saldoInstalacion = parseFloat(inst.monto) - parseFloat(inst.monto_pagado);
+      const montoAplicar = Math.min(montoDisponible, saldoInstalacion);
       
-      const saldoCargo = parseFloat(cargo.saldo_pendiente);
-      const montoAplicar = Math.min(montoDisponible, saldoCargo);
-      
-      // Actualizar cargo
-      const nuevoMontoPagado = parseFloat(cargo.monto_pagado) + montoAplicar;
-      const nuevoEstado = nuevoMontoPagado >= parseFloat(cargo.monto) ? 'pagado' : 'parcial';
+      const nuevoMontoPagado = parseFloat(inst.monto_pagado) + montoAplicar;
+      const nuevoEstado = nuevoMontoPagado >= parseFloat(inst.monto) ? 'pagado' : 'parcial';
       
       await connection.query(
-        'UPDATE cargos SET monto_pagado = ?, estado = ? WHERE id = ?',
-        [nuevoMontoPagado, nuevoEstado, cargo.id]
+        'UPDATE instalaciones SET monto_pagado = ?, estado = ? WHERE id = ?',
+        [nuevoMontoPagado, nuevoEstado, inst.id]
       );
       
-      // Registrar detalle
-      const detalleId = generarUUID();
+      // Actualizar pago con referencia a instalación
       await connection.query(
-        'INSERT INTO pagos_detalle (id, pago_id, cargo_id, monto_aplicado) VALUES (?, ?, ?, ?)',
-        [detalleId, pagoId, cargo.id, montoAplicar]
+        'UPDATE pagos SET instalacion_id = ?, tipo = "instalacion" WHERE id = ?',
+        [inst.id, pagoId]
       );
       
       detalleAplicacion.push({
-        cargo_id: cargo.id,
-        concepto: cargo.concepto,
+        tipo: 'instalacion',
+        id: inst.id,
+        concepto: 'Costo de Instalación',
         monto_aplicado: montoAplicar,
         estado_nuevo: nuevoEstado
       });
       
-      console.log('✅ Aplicado $' + montoAplicar + ' a:', cargo.concepto, '→', nuevoEstado);
-      
+      console.log('✅ Aplicado $' + montoAplicar + ' a instalación →', nuevoEstado);
       montoDisponible -= montoAplicar;
     }
     
-    // 5. SI SOBRA DINERO, ACTUALIZAR SALDO A FAVOR
+    // 4. SEGUNDO: APLICAR A MENSUALIDADES PENDIENTES (ordenadas por vencimiento)
+    if (montoDisponible > 0) {
+      const [mensualidadesPendientes] = await connection.query(`
+        SELECT id, periodo, monto, monto_pagado, es_prorrateado, dias_prorrateados
+        FROM mensualidades 
+        WHERE cliente_id = ? AND estado IN ('pendiente', 'parcial', 'vencido')
+        ORDER BY fecha_vencimiento ASC
+      `, [cliente_id]);
+      
+      for (const mens of mensualidadesPendientes) {
+        if (montoDisponible <= 0) break;
+        
+        const saldoMensualidad = parseFloat(mens.monto) - parseFloat(mens.monto_pagado);
+        const montoAplicar = Math.min(montoDisponible, saldoMensualidad);
+        
+        const nuevoMontoPagado = parseFloat(mens.monto_pagado) + montoAplicar;
+        const nuevoEstado = nuevoMontoPagado >= parseFloat(mens.monto) ? 'pagado' : 'parcial';
+        
+        await connection.query(
+          'UPDATE mensualidades SET monto_pagado = ?, estado = ? WHERE id = ?',
+          [nuevoMontoPagado, nuevoEstado, mens.id]
+        );
+        
+        const concepto = mens.es_prorrateado 
+          ? `Prorrateo ${mens.dias_prorrateados} días` 
+          : `Mensualidad ${mens.periodo}`;
+        
+        detalleAplicacion.push({
+          tipo: mens.es_prorrateado ? 'prorrateo' : 'mensualidad',
+          id: mens.id,
+          concepto,
+          monto_aplicado: montoAplicar,
+          estado_nuevo: nuevoEstado
+        });
+        
+        console.log('✅ Aplicado $' + montoAplicar + ' a', concepto, '→', nuevoEstado);
+        montoDisponible -= montoAplicar;
+      }
+    }
+    
+    // 5. SI SOBRA DINERO → SALDO A FAVOR
     const nuevoSaldoFavor = montoDisponible > 0 ? Math.round(montoDisponible * 100) / 100 : 0;
     
-    // 6. ACTUALIZAR SALDOS DEL CLIENTE
-    const [nuevoAdeudo] = await connection.query(
-      'SELECT COALESCE(SUM(saldo_pendiente), 0) as total FROM cargos WHERE cliente_id = ? AND estado IN ("pendiente", "parcial")',
+    if (nuevoSaldoFavor > 0) {
+      console.log('💚 Saldo a favor:', nuevoSaldoFavor);
+    }
+    
+    // 6. RECALCULAR SALDO PENDIENTE
+    const [adeudoInstalacion] = await connection.query(
+      'SELECT COALESCE(SUM(monto - monto_pagado), 0) as total FROM instalaciones WHERE cliente_id = ? AND estado IN ("pendiente", "parcial")',
       [cliente_id]
     );
     
+    const [adeudoMensualidades] = await connection.query(
+      'SELECT COALESCE(SUM(monto - monto_pagado), 0) as total FROM mensualidades WHERE cliente_id = ? AND estado IN ("pendiente", "parcial", "vencido")',
+      [cliente_id]
+    );
+    
+    const nuevoSaldoPendiente = parseFloat(adeudoInstalacion[0].total) + parseFloat(adeudoMensualidades[0].total);
+    
+    // 7. ACTUALIZAR CLIENTE
     await connection.query(
       'UPDATE clientes SET saldo_favor = ?, saldo_pendiente = ? WHERE id = ?',
-      [nuevoSaldoFavor, nuevoAdeudo[0].total, cliente_id]
+      [nuevoSaldoFavor, nuevoSaldoPendiente, cliente_id]
     );
     
     await connection.commit();
     
-    console.log('💾 Pago registrado exitosamente. Nuevo saldo favor:', nuevoSaldoFavor);
+    console.log('💾 Pago registrado. Saldo favor:', nuevoSaldoFavor, '| Saldo pendiente:', nuevoSaldoPendiente);
     
     res.json({
       ok: true,
@@ -244,11 +271,11 @@ async function registrarPago(req, res) {
         id: pagoId,
         monto: parseFloat(monto),
         saldo_favor_usado: saldoFavorActual,
-        total_aplicado: parseFloat(monto) + saldoFavorActual - nuevoSaldoFavor,
-        nuevo_saldo_favor: nuevoSaldoFavor,
-        cargos_aplicados: detalleAplicacion.length
+        total_aplicado: parseFloat(monto) + saldoFavorActual - nuevoSaldoFavor
       },
-      detalle: detalleAplicacion
+      detalle: detalleAplicacion,
+      nuevo_saldo_favor: nuevoSaldoFavor,
+      nuevo_saldo_pendiente: nuevoSaldoPendiente
     });
     
   } catch (err) {
@@ -261,9 +288,8 @@ async function registrarPago(req, res) {
 }
 
 // ========================================
-// HISTORIAL DE PAGOS CON DETALLE
+// HISTORIAL DE PAGOS
 // ========================================
-
 async function obtenerHistorialPagos(req, res) {
   try {
     const { cliente_id } = req.params;
@@ -272,16 +298,12 @@ async function obtenerHistorialPagos(req, res) {
     const [pagos] = await pool.query(`
       SELECT 
         p.*,
-        mp.nombre as metodo_nombre,
-        GROUP_CONCAT(CONCAT(c.concepto, ': $', pd.monto_aplicado) SEPARATOR ' | ') as aplicado_a
+        mp.nombre as metodo_nombre
       FROM pagos p
       LEFT JOIN metodos_pago mp ON mp.id = p.metodo_pago_id
-      LEFT JOIN pagos_detalle pd ON pd.pago_id = p.id
-      LEFT JOIN cargos c ON c.id = pd.cargo_id
       WHERE p.cliente_id = ?
-      GROUP BY p.id
       ORDER BY p.fecha_pago DESC
-      LIMIT 50
+      LIMIT 100
     `, [cliente_id]);
     
     res.json({ ok: true, pagos });
@@ -292,12 +314,11 @@ async function obtenerHistorialPagos(req, res) {
 }
 
 // ========================================
-// REPORTE DE PAGOS
+// LISTAR TODOS LOS PAGOS
 // ========================================
-
-async function reportePagos(req, res) {
+async function listarPagos(req, res) {
   try {
-    const { desde, hasta, metodo_pago_id } = req.query;
+    const { desde, hasta, metodo_pago_id, limite = 100 } = req.query;
     const pool = obtenerPool();
     
     let sql = `
@@ -327,11 +348,12 @@ async function reportePagos(req, res) {
       params.push(metodo_pago_id);
     }
     
-    sql += ' ORDER BY p.fecha_pago DESC';
+    sql += ' ORDER BY p.fecha_pago DESC LIMIT ?';
+    params.push(parseInt(limite));
     
     const [pagos] = await pool.query(sql, params);
     
-    // Totales
+    // Total
     const total = pagos.reduce((sum, p) => sum + parseFloat(p.monto), 0);
     
     res.json({ 
@@ -343,7 +365,60 @@ async function reportePagos(req, res) {
       }
     });
   } catch (err) {
-    console.error('❌ Error reportePagos:', err.message);
+    console.error('❌ Error listarPagos:', err.message);
+    res.status(500).json({ ok: false, mensaje: 'Error al listar pagos' });
+  }
+}
+
+// ========================================
+// REPORTE DE ADEUDOS
+// ========================================
+async function reporteAdeudos(req, res) {
+  try {
+    const { ciudad_id, colonia_id, vencidos_solo } = req.query;
+    const pool = obtenerPool();
+    
+    let sql = `
+      SELECT 
+        c.id, c.numero_cliente, c.nombre, c.apellido_paterno, c.telefono,
+        c.saldo_pendiente, c.saldo_favor,
+        ci.nombre as ciudad_nombre, co.nombre as colonia_nombre,
+        (SELECT MIN(fecha_vencimiento) FROM mensualidades WHERE cliente_id = c.id AND estado IN ('pendiente', 'parcial', 'vencido')) as vencimiento_mas_antiguo,
+        (SELECT COUNT(*) FROM mensualidades WHERE cliente_id = c.id AND estado = 'vencido') as meses_vencidos
+      FROM clientes c
+      LEFT JOIN catalogo_ciudades ci ON ci.id = c.ciudad_id
+      LEFT JOIN catalogo_colonias co ON co.id = c.colonia_id
+      WHERE c.estado = 'activo' AND c.saldo_pendiente > 0
+    `;
+    const params = [];
+    
+    if (ciudad_id) {
+      sql += ' AND c.ciudad_id = ?';
+      params.push(ciudad_id);
+    }
+    
+    if (colonia_id) {
+      sql += ' AND c.colonia_id = ?';
+      params.push(colonia_id);
+    }
+    
+    sql += ' ORDER BY c.saldo_pendiente DESC';
+    
+    const [rows] = await pool.query(sql, params);
+    
+    // Totales
+    const totalAdeudo = rows.reduce((sum, r) => sum + parseFloat(r.saldo_pendiente), 0);
+    
+    res.json({ 
+      ok: true, 
+      clientes: rows,
+      resumen: {
+        cantidad: rows.length,
+        total_adeudo: Math.round(totalAdeudo * 100) / 100
+      }
+    });
+  } catch (err) {
+    console.error('❌ Error reporteAdeudos:', err.message);
     res.status(500).json({ ok: false, mensaje: 'Error al generar reporte' });
   }
 }
@@ -351,9 +426,9 @@ async function reportePagos(req, res) {
 module.exports = {
   obtenerMetodosPago,
   crearMetodoPago,
-  obtenerPagos,
-  obtenerPagoPorId,
+  obtenerEstadoCuenta,
   registrarPago,
   obtenerHistorialPagos,
-  reportePagos
+  listarPagos,
+  reporteAdeudos
 };
