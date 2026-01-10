@@ -34,7 +34,17 @@ async function obtenerClientes(req, res) {
               ci.nombre as ciudad_nombre,
               co.nombre as colonia_nombre,
               p.nombre as plan_nombre,
-              p.precio_mensual as tarifa_plan
+              p.precio_mensual as tarifa_plan,
+              COALESCE(c.tarifa_mensual, c.cuota_mensual, p.precio_mensual, 0) as tarifa,
+              COALESCE(c.saldo_pendiente, 0) as saldo_pendiente,
+              COALESCE(c.saldo_favor, 0) as saldo_favor,
+              (SELECT COALESCE(SUM(monto), 0) FROM pagos WHERE cliente_id = c.id AND estado = 'activo') as total_pagado,
+              CASE 
+                WHEN c.dia_corte IS NULL THEN NULL
+                WHEN c.dia_corte >= DAY(CURDATE()) 
+                THEN DATE_FORMAT(CONCAT(YEAR(CURDATE()), '-', LPAD(MONTH(CURDATE()), 2, '0'), '-', LPAD(c.dia_corte, 2, '0')), '%Y-%m-%d')
+                ELSE DATE_FORMAT(DATE_ADD(CONCAT(YEAR(CURDATE()), '-', LPAD(MONTH(CURDATE()), 2, '0'), '-', LPAD(c.dia_corte, 2, '0')), INTERVAL 1 MONTH), '%Y-%m-%d')
+              END as proximo_corte
        FROM clientes c
        LEFT JOIN catalogo_ciudades ci ON ci.id = c.ciudad_id
        LEFT JOIN catalogo_colonias co ON co.id = c.colonia_id
